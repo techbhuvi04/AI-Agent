@@ -7,11 +7,18 @@ SUM_TOLERANCE = 0.50
 
 def _build_date_windows(bank):
     sorted_bank = bank.sort_values("value_date").reset_index(drop=True)
-    windows = []
-    prev_date = None
+    dates = [pd.to_datetime(v).date() for v in sorted_bank["value_date"]]
 
-    for _, row in sorted_bank.iterrows():
-        vd = pd.to_datetime(row["value_date"]).date()
+    # Anchor each window to the previous *distinct* value_date — several
+    # credits can share a value_date, and keying off the immediately
+    # preceding row would give every credit after the first an inverted,
+    # empty window.
+    distinct = sorted(set(dates))
+    prev_of = {d: (distinct[i - 1] if i > 0 else None) for i, d in enumerate(distinct)}
+
+    windows = []
+    for (_, row), vd in zip(sorted_bank.iterrows(), dates):
+        prev_date = prev_of[vd]
         window_start = prev_date + timedelta(days=1) if prev_date else date(2000, 1, 1)
         windows.append({
             "utr": row["utr"],
@@ -19,7 +26,6 @@ def _build_date_windows(bank):
             "window_start": window_start,
             "window_end": vd,
         })
-        prev_date = vd
 
     return windows
 

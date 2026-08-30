@@ -1,5 +1,7 @@
 pandas>=2.0
 numpy>=1.24
 pytest>=7.0
-google-generativeai>=0.3.0
+groq>=0.4.0
+python-dotenv>=1.0.0
 streamlit>=1.30.0
+plotly>=5.0

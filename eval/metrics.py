@@ -9,7 +9,7 @@ ALL_BREAK_TYPES = ["clean"] + BREAK_TYPES
 def compute_metrics(result_df, ground_truth_df, cleared_credits, bank_df):
     assigned_mask = result_df["assigned_utr"].notna()
     correct_mask = assigned_mask & (
-        result_df["assigned_utr"].values == ground_truth_df["credit_utr"].values
+        result_df["assigned_utr"].fillna("") == ground_truth_df["credit_utr"]
     )
 
     total = len(result_df)
@@ -32,6 +32,8 @@ def compute_metrics(result_df, ground_truth_df, cleared_credits, bank_df):
         "f1": f1,
         "credits_cleared": len(cleared_credits),
         "total_credits": len(bank_df),
+        "payments_assigned": assigned,
+        "total_payments": total,
     }
 
     per_break = {}

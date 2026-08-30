@@ -15,8 +15,18 @@ Reconciliation means proving mathematically that each bank credit equals a speci
 1. **Setup Environment**
    ```bash
    pip install -r requirements.txt
-   export GEMINI_API_KEY="your_api_key_here" # Required for T3 LLM Agent
+   export GROQ_API_KEY="your_api_key_here" # Optional — see below
    ```
+
+   `GROQ_API_KEY` is **optional**. Without it:
+   * **T3 break classification** falls back to a deterministic refund-aware
+     heuristic, so the full reconciliation pipeline still runs end to end.
+   * **The Settlement Q&A agent** is the one feature that genuinely requires
+     the key; the page degrades to a "Set GROQ_API_KEY to enable natural
+     language queries" message instead of erroring.
+
+   Every number the engine reports is produced deterministically either way —
+   the LLM only ever proposes a *hypothesis*, never a figure.
 
 2. **Run the Interactive Demo**
    ```bash
@@ -36,6 +46,17 @@ Reconciliation means proving mathematically that each bank credit equals a speci
    ```
    This shows how adjusting the LLM Confidence Gate allows a business to trade off between Auto-Clear Rate and Absolute Precision.
 
+## Dashboard pages
+
+| Page | What it shows |
+|------|---------------|
+| **Overview** | Headline metrics — auto-clear rate, precision, ₹ verified, ₹ at risk, throughput |
+| **Reconciliation** | Tier-by-tier execution, assignment table, **Export audit trail** (CSV) |
+| **Analytics** | Ablation heatmap, precision/auto-clear curve, per-break recall |
+| **Exception queue** | Structured break codes, materiality/aging filters, evidence, CSV export |
+| **Cash position** | 7-day forward inflow forecast with confidence band and cash-at-risk aging |
+| **Ask** | Natural-language Q&A over the reconciliation output (requires `GROQ_API_KEY`) |
+
 ## Architecture
 
 The engine uses a tiered "Deterministic First, Probabilistic Second" control loop. 
@@ -44,7 +65,7 @@ Please see [ARCHITECTURE.md](./ARCHITECTURE.md) for a deep dive into the design 
 
 ## Testing
 
-The engine is heavily unit-tested (66/66 passing). Run the suite via:
+The engine is heavily unit-tested (116/116 passing). Run the suite via:
 ```bash
 make test
 ```

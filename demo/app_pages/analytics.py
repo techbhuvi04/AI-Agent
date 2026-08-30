@@ -98,7 +98,7 @@ if heat_rows:
             y=alt.Y("Break type:N", title=None),
             color=alt.Color(
                 "Recall:Q",
-                scale=alt.Scale(scheme="greens", domain=[0, 1]),
+                scale=alt.Scale(scheme="greys", domain=[0, 1]),
                 legend=alt.Legend(title="Recall"),
             ),
             tooltip=[
@@ -118,8 +118,8 @@ if heat_rows:
             text=alt.Text("Recall:Q", format=".2f"),
             color=alt.condition(
                 alt.datum.Recall > 0.5,
-                alt.value("#0F172A"),
-                alt.value("#F1F5F9"),
+                alt.value("#000000"),
+                alt.value("#F5F5F5"),
             ),
         )
     )
@@ -199,7 +199,7 @@ if not curve_df.empty:
                 "Metric:N",
                 scale=alt.Scale(
                     domain=["Auto-clear rate", "Precision"],
-                    range=["#60A5FA", "#34D399"],
+                    range=["#FFFFFF", "#8A8A8A"],
                 ),
             ),
             tooltip=[
@@ -247,7 +247,7 @@ if not break_df.empty:
             y=alt.Y("Break type:N", sort="-x", title=None),
             color=alt.Color(
                 "Recall:Q",
-                scale=alt.Scale(scheme="greens", domain=[0, 1]),
+                scale=alt.Scale(scheme="greys", domain=[0, 1]),
                 legend=None,
             ),
             tooltip=[
@@ -261,7 +261,7 @@ if not break_df.empty:
 
     text_labels = (
         alt.Chart(break_df)
-        .mark_text(dx=20, color="#F1F5F9", fontWeight="bold")
+        .mark_text(dx=20, color="#F5F5F5", fontWeight="bold")
         .encode(
             x="Recall:Q",
             y=alt.Y("Break type:N", sort="-x"),

@@ -5,6 +5,12 @@ import streamlit as st
 # Ensure we can import from the parent directory
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Load .env (gitignored) so GROQ_API_KEY etc. can be set there instead of
+# exported in the shell. No-op if the file doesn't exist.
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
 st.set_page_config(
     page_title="AI Finance Controller",
     page_icon=":material/account_balance:",
@@ -77,6 +83,16 @@ page = st.navigation(
             "app_pages/exceptions.py",
             title="Exception queue",
             icon=":material/warning:",
+        ),
+        st.Page(
+            "app_pages/cashflow.py",
+            title="Cash position",
+            icon=":material/payments:",
+        ),
+        st.Page(
+            "app_pages/qa.py",
+            title="Ask",
+            icon=":material/chat:",
         ),
     ],
     position="top",

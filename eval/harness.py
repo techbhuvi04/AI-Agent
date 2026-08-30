@@ -1,4 +1,6 @@
 import argparse
+import time
+
 import pandas as pd
 
 from recon.engine import load_data, load_ground_truth, reconcile
@@ -8,24 +10,96 @@ from eval.metrics import compute_metrics
 def evaluate(data_dir="data", max_tier=1, min_confidence=0.0):
     orders, settlements, bank = load_data(data_dir)
     ground_truth = load_ground_truth(data_dir)
+
+    start = time.perf_counter()
     result, cleared = reconcile(orders, settlements, bank, max_tier=max_tier, min_confidence=min_confidence)
-    return compute_metrics(result, ground_truth, cleared, bank)
+    elapsed = time.perf_counter() - start
+
+    metrics = compute_metrics(result, ground_truth, cleared, bank)
+    metrics["timing"] = {
+        "elapsed_seconds": elapsed,
+        "num_payments": len(result),
+        "num_credits": len(bank),
+        "throughput": len(result) / elapsed if elapsed > 0 else 0.0,
+    }
+    return metrics
 
 
-def run_ablation(data_dir="data", max_tier_limit=1):
+def print_timing(metrics):
+    t = metrics.get("timing")
+    if not t:
+        return
+    print(
+        f"\n  Reconciled {t['num_payments']} payments across {t['num_credits']} "
+        f"credits in {t['elapsed_seconds']:.2f}s"
+    )
+    print(f"  Throughput: {t['throughput']:.0f} payments/sec")
+
+
+def run_ablation(data_dir="data", max_tier_limit=4, precision_gate=0.95):
     results = {}
     for mt in range(max_tier_limit + 1):
         label = f"T0..T{mt}" if mt > 0 else "T0 only"
         results[label] = evaluate(data_dir, max_tier=mt)
+    if precision_gate > 0:
+        label = f"T0..T{max_tier_limit} @{precision_gate}"
+        results[label] = evaluate(
+            data_dir, max_tier=max_tier_limit, min_confidence=precision_gate
+        )
     return results
 
 
 def run_curve(data_dir="data", max_tier=4):
+    """Sweep the confidence gate.
+
+    The gate is applied *after* every tier has run, so all thresholds
+    share one reconciliation — re-running the tiers per threshold would
+    repeat identical work. We reconcile once ungated and then re-apply
+    each threshold to that single result.
+    """
     thresholds = [0.0, 0.5, 0.7, 0.8, 0.9, 0.95, 0.99]
+
+    orders, settlements, bank = load_data(data_dir)
+    ground_truth = load_ground_truth(data_dir)
+
+    start = time.perf_counter()
+    base_result, _base_cleared = reconcile(
+        orders, settlements, bank, max_tier=max_tier, min_confidence=0.0
+    )
+    elapsed = time.perf_counter() - start
+
     results = {}
     for t in thresholds:
-        results[t] = evaluate(data_dir, max_tier=max_tier, min_confidence=t)
+        gated, cleared = _apply_confidence_gate(base_result, t)
+        metrics = compute_metrics(gated, ground_truth, cleared, bank)
+        metrics["timing"] = {
+            "elapsed_seconds": elapsed,
+            "num_payments": len(gated),
+            "num_credits": len(bank),
+            "throughput": len(gated) / elapsed if elapsed > 0 else 0.0,
+        }
+        results[t] = metrics
     return results
+
+
+def _apply_confidence_gate(result_df, min_confidence):
+    """Re-derive (result, cleared) at a confidence threshold without
+    re-running the tiers. Mirrors the gating reconcile() applies."""
+    gated = result_df.copy()
+
+    if min_confidence > 0.0:
+        low_conf = gated["assigned_confidence"] < min_confidence
+        if low_conf.any():
+            gated.loc[low_conf, ["assigned_utr", "assigned_tier", "assigned_confidence"]] = [
+                pd.NA, pd.NA, pd.NA
+            ]
+
+    cleared = {}
+    for idx, utr in gated["assigned_utr"].items():
+        if pd.notna(utr):
+            cleared.setdefault(utr, []).append(idx)
+
+    return gated, cleared
 
 
 def _fmt(val, width=12):
@@ -62,6 +136,13 @@ def print_ablation(results):
         credits_row += f" {val:>14}"
     print(credits_row)
 
+    payments_row = f"  {'payments_assigned':<20}"
+    for label in labels:
+        o = results[label]["overall"]
+        val = f"{o['payments_assigned']}/{o['total_payments']}"
+        payments_row += f" {val:>14}"
+    print(payments_row)
+
     print(f"\n  Per-break recall:")
     header2 = f"  {'break_type':<20} {'total':>6}"
     for label in labels:
@@ -87,6 +168,14 @@ def print_ablation(results):
                 row += f" {'-':>14}"
         print(row)
 
+    # Timing for the full-pipeline run (the last un-gated tier column).
+    full_pipeline = [
+        r for label, r in results.items()
+        if "@" not in label and r.get("timing")
+    ]
+    if full_pipeline:
+        print_timing(full_pipeline[-1])
+
     print()
 
 
@@ -110,6 +199,8 @@ def print_single(metrics, label=""):
     for bt, m in per_break.items():
         p = f"{m['precision']:.3f}" if m["precision"] is not None else "-"
         print(f"  {bt:<25} {m['total']:>6} {m['correct']:>8} {p:>8} {m['recall']:>8.3f}")
+
+    print_timing(metrics)
 
 
 def print_curve(results):

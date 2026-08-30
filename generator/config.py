@@ -53,13 +53,19 @@ BREAK_FREQUENCIES: Dict[Difficulty, Dict[str, float]] = {
 @dataclass
 class GeneratorConfig:
     seed: int = 42
-    num_payments: int = 500
+    num_payments: int = 5000
     difficulty: Difficulty = Difficulty.MEDIUM
     fee_rate: float = 0.02
     gst_rate: float = 0.18
     settlement_cycle: int = 2
     batch_size_min: int = 80
-    batch_size_max: int = 140
-    capture_window_days: int = 30
+    batch_size_max: int = 160
+    # Scaled with num_payments: the tiered engine partitions candidates by
+    # settlement-date window, so payments must spread across enough dates
+    # that batches mostly land on their own value_date. Cramming 5000
+    # payments into a 30-day window puts up to 9 credits on one date,
+    # which collapses every window into the same multi-batch candidate
+    # pool and makes the exclusion-DP's excess intractable.
+    capture_window_days: int = 270
     rounding_drift_max_paise: int = 4
     output_dir: str = "data"

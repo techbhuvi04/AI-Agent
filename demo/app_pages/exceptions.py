@@ -1,11 +1,15 @@
-"""Exception queue — redesigned investigation workspace."""
+"""Exception queue — structured investigation workspace backed by
+build_exception_report()."""
 
+import json
 import os
 
 import pandas as pd
 import streamlit as st
 
-from shared import run_pipeline, fmt_inr
+from shared import run_pipeline, run_exception_report, fmt_inr, inject_theme_css
+
+inject_theme_css()
 
 # ---------------------------------------------------------------------------
 # Data
@@ -25,6 +29,7 @@ if not os.path.exists(data_dir):
 result_df, bank_df, cleared, metrics, truth = run_pipeline(
     data_dir, max_tier, min_conf
 )
+report_df = run_exception_report(data_dir, max_tier, min_conf)
 
 # ---------------------------------------------------------------------------
 # Header
@@ -32,10 +37,9 @@ result_df, bank_df, cleared, metrics, truth = run_pipeline(
 
 cleared_utrs = set(cleared.keys())
 investigated = st.session_state.get("investigated_utrs", set())
-uncleared_bank = bank_df[
-    ~bank_df["utr"].isin(cleared_utrs | investigated)
-].sort_values("value_date")
-pending_count = len(uncleared_bank)
+if len(report_df) and investigated:
+    report_df = report_df[~report_df["credit_utr"].isin(investigated)]
+pending_count = len(report_df)
 
 st.title(":material/warning: Exception queue")
 
@@ -83,37 +87,53 @@ if pending_count == 0:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Summary metrics
+# Summary banner
 # ---------------------------------------------------------------------------
 
-overall = metrics["overall"]
-total = overall["total_credits"]
-auto_cleared = overall["credits_cleared"]
+total_at_risk = float(report_df["credit_amount"].sum())
+oldest_age = int(report_df["age_days"].max())
 
 with st.container(horizontal=True):
-    st.metric(
-        "Total credits",
-        total,
-        border=True,
+    st.metric("Total unresolved", pending_count, border=True)
+    st.metric("₹ at risk", fmt_inr(total_at_risk), border=True)
+    st.metric("Oldest exception", f"{oldest_age} days", border=True)
+
+st.space("medium")
+
+# ---------------------------------------------------------------------------
+# Filters
+# ---------------------------------------------------------------------------
+
+filter_cols = st.columns(2)
+with filter_cols[0]:
+    materiality_options = ["HIGH", "MEDIUM", "LOW"]
+    selected_materiality = st.multiselect(
+        "Materiality", materiality_options, default=materiality_options,
     )
-    st.metric(
-        "Auto-cleared",
-        auto_cleared,
-        f"{auto_cleared}/{total}",
-        border=True,
+with filter_cols[1]:
+    break_code_options = sorted(report_df["break_code"].unique().tolist())
+    selected_break_codes = st.multiselect(
+        "Break code", break_code_options, default=break_code_options,
     )
-    st.metric(
-        "Manually dismissed",
-        manual_cleared_count,
-        border=True,
-    )
-    st.metric(
-        "Remaining",
-        pending_count,
-        f"{pending_count} require review",
-        delta_color="inverse",
-        border=True,
-    )
+
+filtered = report_df[
+    report_df["materiality"].isin(selected_materiality)
+    & report_df["break_code"].isin(selected_break_codes)
+].sort_values("credit_amount", ascending=False)
+
+st.caption(f"Showing {len(filtered)} of {pending_count} exceptions.")
+
+# ---------------------------------------------------------------------------
+# Export to CSV
+# ---------------------------------------------------------------------------
+
+st.download_button(
+    "Export to CSV",
+    data=report_df.to_csv(index=False),
+    file_name="exception_report.csv",
+    mime="text/csv",
+    icon=":material/download:",
+)
 
 st.space("medium")
 
@@ -121,18 +141,40 @@ st.space("medium")
 # Exception cards
 # ---------------------------------------------------------------------------
 
-unassigned_settlements = result_df[result_df["assigned_utr"].isna()]
+BREAK_CODE_COLORS = {
+    "SUM_COLLISION": "red",
+    "WINDOW_DEFICIT": "orange",
+    "NO_CANDIDATES": "orange",
+    "UNRESOLVED": "gray",
+}
+BREAK_CODE_ACCENT_HEX = {
+    "SUM_COLLISION": "#FFFFFF",
+    "WINDOW_DEFICIT": "#C7C7C7",
+    "NO_CANDIDATES": "#C7C7C7",
+    "UNRESOLVED": "#737373",
+}
 
-for idx, credit in uncleared_bank.iterrows():
-    utr = credit["utr"]
-    amount = credit["credit"]
-    value_date = credit["value_date"]
+# The `duplicate_utr` break means two bank rows can legitimately carry
+# the same UTR, so widget keys are suffixed with the row position — a
+# bare UTR key collides and Streamlit refuses to render the page.
+for row_pos, (_, exc) in enumerate(filtered.iterrows()):
+    utr = exc["credit_utr"]
+    amount = exc["credit_amount"]
+    value_date = exc["value_date"]
+    break_code = exc["break_code"]
+    color = BREAK_CODE_COLORS.get(break_code, "gray")
+    accent = BREAK_CODE_ACCENT_HEX.get(break_code, "#737373")
 
-    with st.container(border=True):
-        # Header row
+    header = (
+        f":material/error_outline: **UTR:** `{utr}` — {fmt_inr(amount)}  "
+        f"·  {exc['age_days']}d old"
+    )
+
+    st.html(f'<div style="height:3px;border-radius:3px 3px 0 0;background:{accent};margin-bottom:-1px;"></div>')
+    with st.expander(header, expanded=False):
         with st.container(horizontal=True):
-            st.markdown(f":material/error_outline: **UTR:** `{utr}`")
-            st.badge("Unresolved", icon=":material/warning:", color="red")
+            st.badge(break_code, color=color)
+            st.badge(exc["materiality"], color="blue" if exc["materiality"] == "HIGH" else "gray")
 
         col_left, col_right = st.columns([1, 2])
 
@@ -140,46 +182,47 @@ for idx, credit in uncleared_bank.iterrows():
             st.markdown("**Target credit**")
             st.metric("Amount", fmt_inr(amount), border=True)
             st.caption(f"Value date: {value_date}")
+            st.caption(f"Δ (delta to closest match): {fmt_inr(exc['delta_inr'])}")
+
+            if exc["hypothesis"]:
+                st.markdown("**T3 hypothesis**")
+                st.caption(exc["hypothesis"])
+
+            st.markdown(f"**Suggested action:** {exc['suggested_action']}")
 
             st.space("small")
 
-            # Mark as investigated callback
             def mark_investigated(u=utr):
                 st.session_state.investigated_utrs.add(u)
 
             st.button(
                 "Mark as investigated",
-                key=f"btn_{utr}",
+                key=f"btn_{row_pos}_{utr}",
                 type="primary",
                 icon=":material/check_circle:",
                 on_click=mark_investigated,
             )
 
         with col_right:
-            st.markdown("**Suspected candidate settlements**")
+            st.markdown("**Evidence — closest candidate subset found**")
+            try:
+                evidence = json.loads(exc["evidence"])
+            except (TypeError, ValueError):
+                evidence = {}
 
-            c_date = pd.to_datetime(value_date).date()
-            start_date = c_date - pd.Timedelta(days=3)
-            end_date = c_date + pd.Timedelta(days=3)
+            closest_ids = evidence.get("closest_entry_ids", [])
+            st.caption(
+                f"{evidence.get('num_candidates', 0)} candidates in window · "
+                f"closest subset sums to {fmt_inr(evidence.get('closest_sum', 0))}"
+            )
 
-            s_dates = pd.to_datetime(unassigned_settlements["settled_at"]).dt.date
-            nearby = unassigned_settlements[
-                s_dates.between(start_date, end_date)
-            ].copy()
-
-            if len(nearby) > 0:
-                nearby_sum = nearby["net"].sum()
-                delta = nearby_sum - amount
-                delta_sign = "+" if delta >= 0 else ""
-
-                st.caption(
-                    f"Found **{len(nearby)}** nearby unassigned settlements "
-                    f"summing to **{fmt_inr(nearby_sum)}** "
-                    f"(Δ {delta_sign}{fmt_inr(delta)})"
-                )
-
+            if closest_ids:
+                evidence_rows = result_df.loc[
+                    [i for i in closest_ids if i in result_df.index],
+                    ["payment_id", "gross", "fee", "gst", "net", "settled_at"],
+                ]
                 st.dataframe(
-                    nearby[["payment_id", "gross", "fee", "gst", "net", "settled_at"]],
+                    evidence_rows,
                     column_config={
                         "payment_id": st.column_config.TextColumn("Payment ID"),
                         "gross": st.column_config.NumberColumn("Gross", format="₹%.2f"),
@@ -194,6 +237,6 @@ for idx, credit in uncleared_bank.iterrows():
                 )
             else:
                 st.warning(
-                    "No nearby unassigned settlements found within ±3 days.",
+                    "No nearby unassigned settlements found.",
                     icon=":material/search_off:",
                 )

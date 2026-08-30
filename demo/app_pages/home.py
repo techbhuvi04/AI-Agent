@@ -5,12 +5,17 @@ import streamlit as st
 
 from shared import (
     run_pipeline,
+    run_headline_metrics,
+    fmt_inr,
     fmt_pct,
     tier_icon,
     tier_label,
     tier_description,
     tier_type_badge,
+    inject_theme_css,
 )
+
+inject_theme_css()
 
 # ---------------------------------------------------------------------------
 # Data
@@ -27,23 +32,32 @@ if not os.path.exists(data_dir):
     )
     st.stop()
 
-result_df, bank_df, cleared, metrics, truth = run_pipeline(
-    data_dir, max_tier, min_conf
-)
+with st.status("Running reconciliation engine...", expanded=False) as status:
+    st.write(":material/database: Loading ledger data...")
+    result_df, bank_df, cleared, metrics, truth = run_pipeline(
+        data_dir, max_tier, min_conf
+    )
+    status.update(label="Engine complete", state="complete", expanded=False)
+
 overall = metrics["overall"]
 
 # ---------------------------------------------------------------------------
 # Hero section
 # ---------------------------------------------------------------------------
 
-st.title(":material/account_balance: AI Finance Controller")
-
-with st.container(horizontal=True):
-    st.caption(
-        "Automated ledger reconciliation engine — "
-        "Razorpay AI Buildathon submission"
-    )
-    st.badge("Live", icon=":material/circle:", color="green")
+st.html(f"""
+<div class="fc-hero">
+  <h1>🏦 AI Finance Controller</h1>
+  <p>Automated ledger reconciliation engine — Razorpay AI Buildathon submission.
+  Deterministic first, probabilistic second: every auto-cleared credit is
+  proven unique, not guessed.</p>
+  <div class="fc-hero-badges">
+    <span class="fc-pill fc-pill-live">Live</span>
+    <span class="fc-pill fc-pill-neutral">T0–T4 pipeline</span>
+    <span class="fc-pill fc-pill-neutral">{overall['total_credits']} bank credits · {len(result_df):,} payments</span>
+  </div>
+</div>
+""")
 
 st.space("medium")
 
@@ -76,10 +90,66 @@ with st.container(horizontal=True):
     )
     st.metric(
         "Unit tests",
-        "66 / 66",
+        "116 / 116",
         "100% passing",
         border=True,
     )
+
+st.space("medium")
+
+# ---------------------------------------------------------------------------
+# Controller metrics — value and throughput
+# ---------------------------------------------------------------------------
+
+st.subheader(":material/query_stats: Controller metrics")
+st.caption(
+    "What the engine actually proved, what it refused to clear, and how fast "
+    "it got there."
+)
+
+headline = run_headline_metrics(data_dir, max_tier, min_conf)
+
+with st.container(horizontal=True):
+    st.metric(
+        "Auto-clear rate",
+        fmt_pct(overall["auto_clear_rate"]),
+        help="Share of payments assigned to a bank credit by the engine.",
+        border=True,
+    )
+    st.metric(
+        "Precision",
+        fmt_pct(overall["precision"]),
+        help="Entries in auto-cleared credits that belong there.",
+        border=True,
+    )
+    st.metric(
+        "₹ verified",
+        fmt_inr(headline["verified_inr"]),
+        help="Total value sitting inside auto-cleared credits.",
+        border=True,
+    )
+    st.metric(
+        "₹ at risk",
+        fmt_inr(headline["at_risk_inr"]),
+        f"{headline['open_exceptions']} open exceptions",
+        delta_color="inverse",
+        help="Value in UNRESOLVED / SUM_COLLISION exceptions.",
+        border=True,
+    )
+    st.metric(
+        "Throughput",
+        f"{headline['throughput']:,.0f} /sec",
+        f"{headline['num_payments']:,} payments in {headline['elapsed_seconds']:.1f}s",
+        help="Payments reconciled per second on the last run.",
+        border=True,
+    )
+
+st.caption(
+    "**Precision** counts entries in auto-cleared credits that belong there. "
+    "The T4 uniqueness gate deliberately trades auto-clear rate for precision — "
+    "a match that many different subsets could satisfy is not evidence, so the "
+    "engine routes it to the exception queue rather than guessing."
+)
 
 st.space("medium")
 
@@ -100,21 +170,21 @@ flowchart LR
     T0[":material/key: **T0**<br/>Key Enrichment"]
     T1[":material/calendar_today: **T1**<br/>Date Arithmetic"]
     T2[":material/calculate: **T2**<br/>Subset-Sum DP"]
-    T3[":material/smart_toy: **T3**<br/>LLM Agent"]
-    T4[":material/verified: **T4**<br/>Arithmetic Verifier"]
+    T3[":material/smart_toy: **T3**<br/>Break Classifier"]
+    T4[":material/verified: **T4**<br/>Verifier + Uniqueness Gate"]
 
     T0 -->|Enriched ledger| T1
     T1 -->|Uncleared credits| T2
     T2 -->|Remaining credits| T3
-    T3 -->|Proposed claims| T4
-    T4 -->|Verified ✓ / Rejected ✗| EQ[Exception Queue]
+    T3 -->|Hypothesis → DP-resolved claims| T4
+    T4 -->|Unique ✓ / Non-unique ✗| EQ[Exception Queue]
 
-    style T0 fill:#1e40af,stroke:#3b82f6,color:#fff
-    style T1 fill:#065f46,stroke:#10b981,color:#fff
-    style T2 fill:#7e22ce,stroke:#a78bfa,color:#fff
-    style T3 fill:#92400e,stroke:#f59e0b,color:#fff
-    style T4 fill:#166534,stroke:#22c55e,color:#fff
-    style EQ fill:#991b1b,stroke:#f87171,color:#fff
+    style T0 fill:#262626,stroke:#8a8a8a,color:#fff
+    style T1 fill:#333333,stroke:#a3a3a3,color:#fff
+    style T2 fill:#404040,stroke:#c7c7c7,color:#fff
+    style T3 fill:#4d4d4d,stroke:#d4d4d4,color:#fff
+    style T4 fill:#595959,stroke:#e5e5e5,color:#fff
+    style EQ fill:#1a1a1a,stroke:#ffffff,color:#fff
 ```
 """
 )

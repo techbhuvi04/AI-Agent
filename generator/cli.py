@@ -11,7 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate synthetic reconciliation data")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--difficulty", choices=["easy", "medium", "hard"], default="medium")
-    parser.add_argument("--num-payments", type=int, default=500)
+    parser.add_argument("--num-payments", type=int, default=5000)
     parser.add_argument("--output-dir", type=str, default="data")
     args = parser.parse_args()
 

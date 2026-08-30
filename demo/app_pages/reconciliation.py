@@ -10,6 +10,7 @@ import streamlit as st
 from shared import (
     run_pipeline,
     run_tier_by_tier,
+    run_audit_trail,
     fmt_inr,
     fmt_pct,
     tier_label,
@@ -123,7 +124,7 @@ if not wf_df.empty and wf_df["Incremental"].sum() > 0:
                 "Tier:N",
                 scale=alt.Scale(
                     domain=list(wf_df["Tier"]),
-                    range=["#3b82f6", "#10b981", "#a78bfa", "#f59e0b", "#22c55e"],
+                    range=["#8a8a8a", "#a3a3a3", "#c7c7c7", "#d4d4d4", "#f5f5f5"],
                 ),
                 legend=None,
             ),
@@ -137,7 +138,7 @@ if not wf_df.empty and wf_df["Incremental"].sum() > 0:
 
     text = (
         alt.Chart(wf_df)
-        .mark_text(dx=15, color="#F1F5F9", fontWeight="bold")
+        .mark_text(dx=15, color="#F5F5F5", fontWeight="bold")
         .encode(
             x="Incremental:Q",
             y=alt.Y("Tier:N", sort=list(wf_df["Tier"])),
@@ -160,6 +161,16 @@ st.caption("Every settlement and its reconciliation assignment.")
 
 result_df, bank_df, cleared, metrics, truth = run_pipeline(
     data_dir, max_tier, min_conf
+)
+
+audit_df = run_audit_trail(data_dir, max_tier, min_conf)
+st.download_button(
+    "Export audit trail",
+    data=audit_df.to_csv(index=False),
+    file_name="audit_trail.csv",
+    mime="text/csv",
+    icon=":material/download:",
+    help="Full per-entry paper trail: assignment, tier, reason code, confidence, and evidence.",
 )
 
 # Show the settlement assignments
