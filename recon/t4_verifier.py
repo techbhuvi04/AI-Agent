@@ -237,17 +237,15 @@ def verify_claims(result_df, bank_df, claims):
             pool_entry_ids, pool_values_paise, target_paise, cap=cap
         )
         all_solutions = set(sols)
-        if not all_solutions and exhaustive:
-            # Rounding-drift fallback: the claim already passed the ±0.50
-            # sum check, so if the exact paise target provably has no
-            # subset, the true match must sit a few paise off. Search
-            # outward and stop at the first offset that yields anything.
-            #
-            # Only worth doing when the exact-target search was
-            # exhaustive. If the DP already ran out of budget there, it
-            # will run out at every offset too — uniqueness is
-            # unprovable either way, so sweeping the band is ~100 wasted
-            # DP runs per claim that cannot change the verdict.
+        if exhaustive:
+            # The claim only passed a ±0.50 *sum* check, so a competing
+            # subset landing a few paise off the exact target is still a
+            # collision the controller needs to see. Sweep the whole
+            # tolerance band and collect every distinct subset across it —
+            # uniqueness means unique *within tolerance*, not just at the
+            # exact paise value. (Only worth doing when the exact search
+            # was exhaustive; if the DP already ran out of budget it will
+            # at every offset too, and the verdict can't change.)
             for delta in range(1, SUM_TOLERANCE_PAISE + 1):
                 for t in (target_paise - delta, target_paise + delta):
                     band_sols, band_exhaustive = _solutions_as_entry_sets(
@@ -255,7 +253,7 @@ def verify_claims(result_df, bank_df, claims):
                     )
                     all_solutions.update(band_sols)
                     exhaustive = exhaustive and band_exhaustive
-                if all_solutions or not exhaustive:
+                if len(all_solutions) > AMBIGUOUS_MAX_SOLUTIONS or not exhaustive:
                     break
 
         count = len(all_solutions)
