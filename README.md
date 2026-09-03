@@ -176,4 +176,4 @@ Every credit the engine declines to clear becomes a structured row via `build_ex
 make test
 ```
 
-**121 / 121 passing.** Covers T0–T4, the subset-sum DP, the eval metrics (structure, payment_id alignment, perfect-assignment scores), and the Streamlit dashboard pages.
+**132 / 132 passing.** Covers T0–T4, the subset-sum DP, the T4 uniqueness gate (including an adversarial near-collision and a netting-split walk-through — `tests/test_near_collision.py`, `tests/test_netting_split_demo.py`), the eval metrics (structure, payment_id alignment, perfect-assignment scores), and the Streamlit dashboard pages.

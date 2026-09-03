@@ -101,6 +101,25 @@ After 0:50, before Analytics, drop in the **Ask** page:
 > are most urgent?")* **It answers from the verified structured output — never the
 > raw ledger.**
 
+Or expand an exception and hit **"Why did this break?"** — a two-sentence
+plain-English explanation for a non-technical controller, grounded in the
+structured evidence shown below it.
+
+## The "DP limit, LLM crosses it" moment (if a judge asks, or for a longer cut)
+
+`tests/test_netting_split_demo.py` is the concrete version of "the LLM does what
+the algorithm can't." One ₹1,000 batch, paid by the bank as ₹600 + ₹400:
+
+- Per credit, the pool is ambiguous — ₹600 is reachable two ways, ₹400 two ways.
+  The DP + uniqueness gate **refuse to guess**: they clear only the payment in
+  *every* valid subset and flag the rest `AMBIGUOUS_PARTIAL`.
+- The LLM classifies it `netting_split` and proposes `merge_with_utr`. The
+  resolver solves the **combined** ₹1,000 target — which *is* unique, exactly the
+  six payments — recovering the batch the per-credit DP could not.
+
+`python3 -m pytest tests/test_netting_split_demo.py -v` — 6 tests, run it on camera
+if you want the receipt.
+
 ---
 
 ## Numbers to have right (seed 42, LLM active)
