@@ -132,9 +132,10 @@ def _generate_with_retry(client, prompt, max_tokens, label):
                 continue
             if is_rate_limit:
                 return (
-                    "The LLM provider's usage limit was hit for this model. "
-                    "Try again in a minute, or set LLM_MODEL to a different "
-                    "model in your .env file."
+                    "Every available model on this API key is rate-limited "
+                    "right now — the free-tier quota resets shortly. The "
+                    "reconciliation engine and all figures are unaffected; "
+                    "only this chat needs the LLM."
                 )
             print(f"  {label}: LLM call failed: {e}")
             return "The assistant hit an error — please try again."

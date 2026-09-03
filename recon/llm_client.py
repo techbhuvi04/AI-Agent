@@ -13,6 +13,21 @@ import os
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
 
+# When the primary model's per-minute or daily token quota is exhausted,
+# fall through to another model on the same key before giving up — each
+# Groq model has its own quota, so a 429 on one is not a 429 on all.
+_FALLBACK_MODELS = [
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "groq/compound-mini",
+]
+
+
+def _is_quota_error(exc):
+    msg = str(exc)
+    return "rate_limit_exceeded" in msg or "429" in msg
+
 
 class _GroqTextClient:
     """Wraps a Groq chat client so callers can do `client.generate_content(prompt).text`,
@@ -21,18 +36,29 @@ class _GroqTextClient:
     def __init__(self, client, model):
         self._client = client
         self._model = model
+        # Models to try, primary first, then the rest of the fallback list.
+        self._chain = [model] + [m for m in _FALLBACK_MODELS if m != model]
 
     def generate_content(self, prompt, json_mode=False, max_tokens=None):
-        kwargs = {
-            "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
-        }
+        base = {"messages": [{"role": "user", "content": prompt}]}
         if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
+            base["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-        response = self._client.chat.completions.create(**kwargs)
-        return _Response(response.choices[0].message.content)
+            base["max_tokens"] = max_tokens
+
+        last_exc = None
+        for i, model in enumerate(self._chain):
+            try:
+                response = self._client.chat.completions.create(model=model, **base)
+                if i > 0:
+                    print(f"  LLM: '{self._chain[0]}' unavailable, used '{model}'")
+                return _Response(response.choices[0].message.content)
+            except Exception as e:
+                last_exc = e
+                if _is_quota_error(e) and i < len(self._chain) - 1:
+                    continue  # try the next model
+                raise
+        raise last_exc
 
 
 class _Response:

@@ -325,48 +325,50 @@ def inject_theme_css():
          --------------------------------------------------------------- */
 
       /* Message rows: breathing room + a hairline divider between turns. */
-      [data-testid="stChatMessage"] {
+      .stChatMessage[data-testid="stChatMessage"] {
         background: transparent;
-        padding: 16px 0 8px;
-        gap: 12px;
+        padding: 16px 0 10px;
+        gap: 14px;
         align-items: flex-start;
       }
-      [data-testid="stChatMessage"] + [data-testid="stChatMessage"] {
-        border-top: 1px solid rgba(255,255,255,0.06);
+      .stChatMessage[data-testid="stChatMessage"] + .stChatMessage[data-testid="stChatMessage"] {
+        border-top: 1px solid rgba(255,255,255,0.07);
       }
 
       /* Avatars: monochrome. User = outline, assistant = filled (it speaks). */
       [data-testid="stChatMessageAvatarUser"] {
         background: #141414 !important;
         border: 1px solid #3A3A3A !important;
-        color: #F5F5F5 !important;
+        color: #E5E5E5 !important;
       }
       [data-testid="stChatMessageAvatarAssistant"] {
         background: #F5F5F5 !important;
         border: 1px solid #F5F5F5 !important;
         color: #000000 !important;
       }
+      [data-testid="stChatMessageAvatarAssistant"] [data-testid="stIconMaterial"] {
+        color: #000000 !important;
+      }
 
-      /* Assistant reply reads as a card; the user's question stays plain
-         so the eye lands on the answer. :has() picks the row by its avatar. */
-      [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
-        > [data-testid="stChatMessageContent"] {
-        background: linear-gradient(160deg, rgba(255,255,255,0.05), rgba(20,20,20,0.35));
-        border: 1px solid #2A2A2A;
-        border-radius: 3px 12px 12px 12px;
-        padding: 12px 16px;
+      /* Assistant reply reads as a card; the user's question stays plain. */
+      .stChatMessage[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
+        [data-testid="stChatMessageContent"] {
+        background: linear-gradient(160deg, rgba(255,255,255,0.06), rgba(20,20,20,0.40)) !important;
+        border: 1px solid #2E2E2E !important;
+        border-radius: 3px 13px 13px 13px !important;
+        padding: 12px 16px !important;
       }
       [data-testid="stChatMessageContent"] { line-height: 1.55; }
       [data-testid="stChatMessageContent"] p:last-child { margin-bottom: 0; }
 
       /* Input bar: lift it off the page, match the 8px radius system. */
       [data-testid="stChatInput"] {
-        border: 1px solid #3A3A3A;
-        border-radius: 12px;
-        background: #0C0C0C;
-        box-shadow: 0 -2px 24px rgba(0,0,0,0.6);
+        border: 1px solid #3A3A3A !important;
+        border-radius: 12px !important;
+        background: #0C0C0C !important;
+        box-shadow: 0 -2px 28px rgba(0,0,0,0.7);
       }
-      [data-testid="stChatInput"]:focus-within { border-color: #6E6E6E; }
+      [data-testid="stChatInput"]:focus-within { border-color: #6E6E6E !important; }
       [data-testid="stChatInput"] textarea::placeholder { color: #6E6E6E; }
 
       /* Empty state */
