@@ -90,7 +90,7 @@ with st.container(horizontal=True):
     )
     st.metric(
         "Unit tests",
-        "116 / 116",
+        "121 / 121",
         "100% passing",
         border=True,
     )

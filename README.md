@@ -23,18 +23,26 @@ Reconciliation means proving mathematically that each bank credit equals a speci
    export GROQ_API_KEY="your_api_key_here"   # Optional — see below
    ```
 
-   `GROQ_API_KEY` is **optional**. Without it:
+   `GROQ_API_KEY` is **optional**. With it, T3 uses an LLM (default
+   `qwen/qwen3.8-27b`, override with `LLM_MODEL`) to classify break shapes.
+   Without it:
    * **T3 break classification** falls back to a deterministic refund-aware
      heuristic, so the full reconciliation pipeline still runs end to end.
-   * If the key is present but the daily quota is exhausted mid-run, T3 trips
-     a shared circuit breaker and the remaining credits fall back to the same
-     heuristic solver rather than each burning another doomed request.
+   * If the key is present but the per-minute token quota is hit mid-run, T3
+     backs off for the API-suggested delay (a bounded per-run budget,
+     `T3_BACKOFF_BUDGET_S`); once that budget is spent it trips a circuit
+     breaker and the remaining credits fall back to the heuristic solver
+     rather than each burning another doomed request. On a shared free-tier
+     quota T3 runs **serially** by default (`T3_LLM_MAX_WORKERS=1`) — raise
+     it when the account has real throughput headroom.
    * **The Settlement Q&A agent** is the one feature that genuinely requires
      the key; the page degrades to a "Set GROQ_API_KEY to enable natural
      language queries" message instead of erroring.
 
    Every number the engine reports is produced deterministically either way —
-   the LLM only ever proposes a *hypothesis*, never a figure.
+   the LLM only ever proposes a *hypothesis* (a break class + a structured
+   action), never a figure. `resolve_hypothesis()` then re-runs real
+   arithmetic and T4 re-verifies.
 
 2. **Run the Interactive Demo**
    ```bash
@@ -74,7 +82,7 @@ The engine uses a tiered "deterministic first, probabilistic second" control loo
 | **T0** | Key enrichment | Deterministic | Join `orders.csv` + `settlements.csv` on `payment_id` (`validate="m:1"` — a fan-out here would silently corrupt every downstream metric). Missing orders are retained: the bank still credited us for them. |
 | **T1** | Date-window arithmetic | Deterministic | Clear perfect date-boundary batches where the unassigned payments on one date sum exactly to a credit. Usually clears little, but narrows the search space for T2. All arithmetic in **integer paise** (`int(round(v*100))`) to kill floating-point drift. |
 | **T2** | Constrained subset-sum | Deterministic | Bitmask exclusion-DP: find the few entries to *exclude* to hit the excess (Σcandidates − target), not the many to include. Progressive window expansion (strict → +3d → +6d). |
-| **T3** | Break classification agent | Probabilistic | Send **diagnostics, not rows** to the LLM; get back a `break_classification` and a *structured hypothesis*. `resolve_hypothesis()` then tests that hypothesis with real arithmetic. Deterministic heuristic fallback when no LLM is available. LLM calls are fanned out across a thread pool; deterministic resolution stays strictly sequential against the live ledger. |
+| **T3** | Break classification agent | Probabilistic | Send **diagnostics, not rows** to the LLM (compact ~300-token prompt, JSON mode); get back a `break_classification` and a *structured hypothesis*. `resolve_hypothesis()` then tests that hypothesis with real arithmetic. Deterministic heuristic fallback when no LLM is available or the per-run token budget is spent. Serial by default on a shared quota (`T3_LLM_MAX_WORKERS`); deterministic resolution stays strictly sequential against the live ledger. |
 | **T4** | Arithmetic verifier + uniqueness gate | Deterministic gate | Re-check every claim's sum (±₹0.50) and index availability, then count *how many distinct subsets* hit the target. Uniqueness — not sum-equality — is the evidence. |
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full design rationale, including the exclusion-DP, the integer-paise standard, the T4 uniqueness gate, and the bitset subset-sum optimisation.
@@ -110,23 +118,30 @@ Ground truth is aligned to the engine output **by `payment_id`** (`set_index(...
 
 ### Measured results — 5,538 payments / 83 credits, seed 42, medium difficulty
 
-Run with `GROQ_API_KEY` unset (T3 = deterministic heuristic), so the table isolates the algorithmic behaviour:
+**LLM classifier active** (`GROQ_API_KEY` set, `qwen/qwen3.8-27b`):
 
 | metric | T0 | T0..T1 | T0..T2 | T0..T3 | T0..T4 | T0..T4 @0.95 |
 |---|---|---|---|---|---|---|
-| auto_clear_rate | 0.000 | 0.000 | 0.701 | 0.772 | **0.772** | 0.044 |
-| precision | – | – | 0.625 | 0.578 | **0.578** | **0.808** |
-| recall / accuracy | 0.000 | 0.000 | 0.438 | 0.447 | **0.447** | 0.036 |
-| credits_cleared | 0/83 | 0/83 | 55/83 | 64/83 | **64/83** | 3/83 |
-| payments_assigned | 0/5538 | 0/5538 | 3883/5538 | 4278/5538 | **4278/5538** | 245/5538 |
+| auto_clear_rate | 0.000 | 0.000 | 0.701 | 0.722 | **0.717** | 0.044 |
+| precision | – | – | 0.625 | 0.630 | **0.635** | **0.808** |
+| recall / accuracy | 0.000 | 0.000 | 0.438 | 0.455 | **0.455** | 0.036 |
+| credits_cleared | 0/83 | 0/83 | 55/83 | 57/83 | **57/83** | 3/83 |
 
-`Reconciled 5538 payments across 83 credits in ~1.4s — Throughput ~3,900 payments/sec.`
+`Reconciled 5538 payments across 83 credits in ~90s (dominated by LLM round-trips) — the deterministic tiers alone run in ~1.4s.` T3 is stochastic, so these move ±1–2 credits / ±0.01 precision between runs.
 
-**Reading the T3 → T4 columns.** T3 adds 9 credits (55 → 64) and lifts auto-clear to 0.772, at the cost of precision (0.625 → 0.578) — the heuristic's extra matches aren't all right. T4 keeps those 64: its `AMBIGUOUS_PARTIAL` path accepts the sum-checked subsets at 0.65 confidence rather than discarding them. Tightening the confidence gate to 0.95 then trades almost all of the auto-clear rate back for **0.808 precision**. *Precision is bought with auto-clear rate, deliberately* — and the `@0.95` column is the setting a controller who needs a trustworthy figure would run.
+**How to read it.** T3's LLM classifier **raises precision** (0.625 → 0.635) *and* recall (0.438 → 0.455) over the deterministic tiers, while clearing fewer credits than the blunt heuristic would (57 vs 64) — the ones it does clear are more likely to be right, which is the correct trade for a financial ledger. Per-break, the LLM wins exactly where structure matters: `netting_split` 0.360 → 0.386, `refund` 0.564 → 0.588, `chargeback_reversal` 0.592 → 0.599. T4's uniqueness gate then nudges precision up another notch (0.630 → 0.635) by rejecting the few unevidenced claims. `@0.95` trades almost all the auto-clear rate for **0.808 precision** — the setting a controller who needs a trustworthy figure would run.
 
-> Earlier, T4's uniqueness gate rejected *every* T3 claim: with 100–140-entry pools the enumeration DP hit its state ceiling before proving anything, so `not exhaustive` fired a blanket `NON_UNIQUE` and the `T0..T4` column fell back to exactly the `T0..T2` numbers (55/83, precision 0.625). Narrowing the pool window to ±7 days and adding the non-exhaustive `AMBIGUOUS_PARTIAL @ 0.65` branch is what lets T3 reach production through the verifier.
+**Deterministic-only** (`GROQ_API_KEY` unset — T3 = refund-aware heuristic), for comparison:
 
-With a live `GROQ_API_KEY`, T3's classification-driven matches (which understand the *shape* of a break) replace the blunt heuristic and land at higher precision than the numbers above.
+| metric | T0..T2 | T0..T3 | T0..T4 | @0.95 |
+|---|---|---|---|---|
+| auto_clear_rate | 0.701 | 0.772 | 0.772 | 0.044 |
+| precision | 0.625 | 0.578 | 0.578 | 0.808 |
+| credits_cleared | 55/83 | 64/83 | 64/83 | 3/83 |
+
+The heuristic clears more (64) at lower precision (0.578); the LLM path is the more *selective* one.
+
+> Earlier, T4's uniqueness gate rejected *every* T3 claim: with 100–140-entry pools the enumeration DP hit its state ceiling before proving anything, so `not exhaustive` fired a blanket `NON_UNIQUE` and the `T0..T4` column fell back to exactly the `T0..T2` numbers. Narrowing the pool window to ±7 days and adding the non-exhaustive `AMBIGUOUS_PARTIAL @ 0.65` branch is what lets T3 reach production through the verifier.
 
 ### Performance: the bitset subset-sum
 

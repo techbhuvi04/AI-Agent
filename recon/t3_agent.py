@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 
@@ -115,6 +117,25 @@ def _is_rate_limit_error(exc):
     return "rate_limit_exceeded" in msg or "429" in msg
 
 
+def _retry_after_seconds(exc, default=5.0):
+    """Groq's 429 body carries 'Please try again in 3.07s' — honour it so
+    we back off exactly as long as the quota window needs, not a guess."""
+    m = re.search(r"try again in ([\d.]+)\s*s", str(exc))
+    if m:
+        try:
+            return min(float(m.group(1)) + 0.5, 30.0)
+        except ValueError:
+            pass
+    return default
+
+
+# Per-run budget for waiting out 429s. Free-tier TPM windows refill every
+# ~60s, so a few tens of seconds of cumulative backoff clears most of a
+# run; past this we stop paying the latency and fall back to the heuristic.
+RATE_LIMIT_BACKOFF_BUDGET_S = float(os.environ.get("T3_BACKOFF_BUDGET_S", "90"))
+CLASSIFY_MAX_TOKENS = int(os.environ.get("T3_CLASSIFY_MAX_TOKENS", "800"))
+
+
 def _call_llm(client, prompt):
     try:
         response = client.generate_content(prompt)
@@ -124,17 +145,32 @@ def _call_llm(client, prompt):
         return None
 
 
-def _call_llm_checked(client, prompt):
-    """Like _call_llm, but also surfaces whether the failure was a
-    rate limit — callers fanning this out across a pool use that signal
-    to stop sending doomed requests instead of burning through the rest
-    of an already-exhausted daily quota one 429 at a time."""
-    try:
-        response = client.generate_content(prompt)
-        return response.text, False
-    except Exception as e:
-        print(f"  T3: LLM call failed: {e}")
-        return None, _is_rate_limit_error(e)
+def _call_llm_checked(client, prompt, backoff_budget):
+    """Call the LLM in JSON mode, retrying on a 429 for as long as the
+    shared `backoff_budget` (a mutable [seconds] cell) allows — free-tier
+    TPM windows refill every ~60s, so waiting out a couple of 429s
+    recovers most of a run. Returns (text_or_None, rate_limited) where
+    `rate_limited` is True only once the budget is spent, telling the
+    caller to trip the circuit breaker and fall back to the heuristic."""
+    while True:
+        try:
+            response = client.generate_content(
+                prompt, json_mode=True, max_tokens=CLASSIFY_MAX_TOKENS
+            )
+            return response.text, False
+        except Exception as e:
+            if _is_rate_limit_error(e):
+                wait = _retry_after_seconds(e)
+                if backoff_budget[0] - wait < 0:
+                    print(f"  T3: rate-limit backoff budget spent — {e}")
+                    return None, True
+                backoff_budget[0] -= wait
+                print(f"  T3: rate limited, backing off {wait:.1f}s "
+                      f"(budget left {backoff_budget[0]:.0f}s)")
+                time.sleep(wait)
+                continue
+            print(f"  T3: LLM call failed: {e}")
+            return None, False
 
 
 # ---------------------------------------------------------------------------
@@ -208,59 +244,44 @@ def compute_diagnostics(df, used_indices, credit_row, bank_sorted, pos):
     }
 
 
+CLASSIFICATION_SYSTEM = (
+    "You classify unreconciled bank-credit breaks and propose ONE structured "
+    "resolution hypothesis. Do not propose entry_ids; a deterministic solver "
+    "tests your hypothesis. Reply with a single JSON object, no prose.\n"
+    "break_classification (pick one): "
+    "late_settlement (credit exceeds window, members settled T+3/T+4) | "
+    "netting_split (one batch split across 2 UTRs) | "
+    "refund_batch (refunds/chargebacks reduce the total) | "
+    "duplicate_utr (two bank rows, same batch) | "
+    "rounding_drift (<Rs.1 fee-rounding gap) | "
+    "missing_order (some payment_ids lack an order record) | unknown.\n"
+    "hypothesis.action (pick one): "
+    "expand_window (set expand_days) | "
+    "merge_with_utr (set merge_utr to an adjacent UTR) | "
+    "accept_with_tolerance (rounding_drift only) | manual_review.\n"
+    'Schema: {"break_classification": "...", "hypothesis": '
+    '{"action": "...", "expand_days": 0, "merge_utr": ""}, '
+    '"reasoning": "one sentence", "confidence": 0.0}'
+)
+
+
 def _build_classification_prompt(diagnostics):
-    nearby_lines = "\n".join(
-        f"  - {n['position']}: {n['utr']} (₹{n['amount']:.2f})"
+    nearby = "; ".join(
+        f"{n['position']} {n['utr']} Rs.{n['amount']:.2f}"
         for n in diagnostics["nearby_credits"]
-    ) or "  (none)"
+    ) or "none"
 
-    return f"""You are a payment reconciliation expert. A bank credit could not be matched \
-to a set of settlement entries by deterministic subset-sum. Classify the break and \
-propose a STRUCTURED hypothesis for how to resolve it — do NOT propose specific \
-entry_ids; a deterministic solver will test your hypothesis and a separate \
-arithmetic verifier will check the result.
-
-## Bank Credit
-- UTR: {diagnostics['credit_utr']}
-- Amount: {diagnostics['credit_amount']:.2f}
-- Value Date: {diagnostics['value_date']}
-- Strict window: {diagnostics['window_start']} to {diagnostics['window_end']}
-
-## Diagnostics
-- window_deficit (candidates in window can't reach the credit amount): {diagnostics['window_deficit']}
-- excess_paise (candidate total minus credit target, in paise): {diagnostics['excess_paise']}
-- num_candidates in window: {diagnostics['num_candidates']}
-- negative_entries_present (refunds/chargebacks in window): {diagnostics['negative_entries_present']}
-- nearby_credits:
-{nearby_lines}
-
-## Break classifications
-- late_settlement: credit exceeds window, members settled T+3/T+4
-- netting_split: this credit is part of a split across 2 UTRs
-- refund_batch: batch contains refunds/chargebacks reducing total
-- duplicate_utr: two bank rows reference the same underlying batch
-- rounding_drift: <₹1 discrepancy from fee rounding
-- missing_order: some payment_ids have no order record
-- unknown: none of the above clearly applies
-
-## Hypothesis actions
-- expand_window: widen the settlement window by expand_days on each side
-- merge_with_utr: this credit's members are split with an adjacent UTR — set merge_utr
-- accept_with_tolerance: accept the window as-is within rounding tolerance (rounding_drift only)
-- manual_review: route to the exception queue for a human
-
-Respond with ONLY this JSON (no markdown, no explanation outside the JSON):
-{{
-  "credit_utr": "{diagnostics['credit_utr']}",
-  "break_classification": "one of {'|'.join(BREAK_CLASSIFICATIONS)}",
-  "hypothesis": {{
-    "action": "one of {'|'.join(HYPOTHESIS_ACTIONS)}",
-    "expand_days": 0,
-    "merge_utr": ""
-  }},
-  "reasoning": "one sentence",
-  "confidence": 0.0
-}}"""
+    return (
+        f"{CLASSIFICATION_SYSTEM}\n\n"
+        f"credit_utr={diagnostics['credit_utr']} "
+        f"amount={diagnostics['credit_amount']:.2f} "
+        f"window={diagnostics['window_start']}..{diagnostics['window_end']}\n"
+        f"window_deficit={diagnostics['window_deficit']} "
+        f"excess_paise={diagnostics['excess_paise']} "
+        f"num_candidates={diagnostics['num_candidates']} "
+        f"negative_entries_present={diagnostics['negative_entries_present']}\n"
+        f"nearby_credits: {nearby}"
+    )
 
 
 def resolve_hypothesis(df, used_indices, bank_lookup, diagnostics, break_classification, hypothesis):
@@ -338,10 +359,13 @@ def resolve_hypothesis(df, used_indices, bank_lookup, diagnostics, break_classif
     return None
 
 
-LLM_MAX_WORKERS = int(os.environ.get("T3_LLM_MAX_WORKERS", "8"))
+# Default to serial: on a shared per-minute token quota (free tier),
+# fanning N requests out just triggers N simultaneous 429s. Raise
+# T3_LLM_MAX_WORKERS when the account has real throughput headroom.
+LLM_MAX_WORKERS = int(os.environ.get("T3_LLM_MAX_WORKERS", "1"))
 
 
-def _classify_one(client, result_df, used_indices_snapshot, credit_row, bank_sorted, pos, rate_limited_event):
+def _classify_one(client, result_df, used_indices_snapshot, credit_row, bank_sorted, pos, rate_limited_event, backoff_budget):
     """One credit's diagnostics + LLM call — the network-bound unit of work
     that gets fanned out across a thread pool. Reads `used_indices_snapshot`
     (frozen before the pool starts) only to shape the candidate pool the
@@ -351,11 +375,11 @@ def _classify_one(client, result_df, used_indices_snapshot, credit_row, bank_sor
     so a slightly stale snapshot can at worst make the LLM's suggestion
     less apt, never cause a double-assignment.
 
-    `rate_limited_event` is a circuit breaker shared across the pool: once
-    any worker sees a 429, later-starting workers skip the network call
-    entirely instead of each independently discovering the same exhausted
-    daily quota — the account has one shared quota, so retrying it N more
-    times just burns N more doomed round-trips.
+    `rate_limited_event` is a circuit breaker shared across the pool: it
+    is set only once the shared `backoff_budget` (seconds we're willing to
+    spend waiting out 429s this run) is exhausted. After that, remaining
+    workers skip the network entirely and the caller falls back to the
+    deterministic heuristic for whatever is still uncleared.
     """
     utr = credit_row["utr"]
     diagnostics = compute_diagnostics(result_df, used_indices_snapshot, credit_row, bank_sorted, pos)
@@ -367,7 +391,7 @@ def _classify_one(client, result_df, used_indices_snapshot, credit_row, bank_sor
     print(f"  T3: classifying break for {utr}...")
     if rate_limited_event.is_set():
         return pos, utr, diagnostics, None
-    raw, was_rate_limited = _call_llm_checked(client, prompt)
+    raw, was_rate_limited = _call_llm_checked(client, prompt, backoff_budget)
     if was_rate_limited:
         rate_limited_event.set()
         print("  T3: rate limit hit — skipping remaining LLM calls for this run")
@@ -399,12 +423,16 @@ def _classification_solve(result_df, bank_df, already_cleared, client):
     used_indices_snapshot = frozenset(used_indices)
     results_by_pos = {}
     rate_limited_event = threading.Event()
+    # Mutable one-cell budget (seconds) shared across workers; each 429
+    # backoff decrements it, and the breaker trips when it hits zero.
+    backoff_budget = [RATE_LIMIT_BACKOFF_BUDGET_S]
     if pending:
         with ThreadPoolExecutor(max_workers=min(LLM_MAX_WORKERS, len(pending))) as pool:
             futures = [
                 pool.submit(
                     _classify_one, client, result_df, used_indices_snapshot,
                     credit_row, bank_sorted, pos, rate_limited_event,
+                    backoff_budget,
                 )
                 for pos, credit_row in pending
             ]

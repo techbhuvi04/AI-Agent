@@ -28,9 +28,10 @@ Some credits cannot be solved by subset-sum (e.g. `netting_split` where a batch 
 * **Design Decision (Classify the break, don't propose the subset):** T3 originally asked the LLM to return `proposed_entry_ids` — i.e. to *do subset-sum*. That is precisely the task LLMs are worst at and the task T2's DP already solves exactly. The LLM's real comparative advantage is **structural**: recognising the *shape* of a break. So T3 now sends **diagnostics, not rows** — `window_deficit`, `excess_paise`, `num_candidates`, `nearby_credits`, `negative_entries_present` — and asks for two things:
   1. a `break_classification` (`late_settlement`, `netting_split`, `refund_batch`, `duplicate_utr`, `rounding_drift`, `missing_order`, `unknown`), and
   2. a **structured hypothesis** — an `action` (`expand_window`, `merge_with_utr`, `accept_with_tolerance`, `manual_review`) plus its parameters.
+* **Design Decision (Compact prompt + JSON mode):** the prompt is ~300 tokens — a one-line description of each break class and action, the diagnostics as `key=value` pairs, and an inline schema — sent with the provider's JSON-object response mode and a `max_tokens` cap. The verbose "## Bank Credit / ## Diagnostics / ## Rules" prose the first version used ran to ~2,600 tokens per call, which alone exhausts a free-tier per-minute token quota in two or three requests. Default model is `qwen/qwen3.8-27b` (fast, ~450 tokens round-trip, obeys JSON mode); override with `LLM_MODEL`.
 * **Design Decision (Deterministic resolver):** The hypothesis is never applied as stated. `resolve_hypothesis()` *tests* it with real arithmetic — `expand_window` re-runs the T2 DP over the widened window; `merge_with_utr` solves for the combined target of both credits and then re-splits; `accept_with_tolerance` is admissible only for `rounding_drift`; `manual_review` routes straight to the exception queue. The LLM narrows the search; the DP decides.
-* **Design Decision (Heuristic fallback):** With `GROQ_API_KEY` unset, T3 falls back to a deterministic refund-aware wide-window matcher, so the pipeline runs end to end without any LLM. The same fallback catches a mid-run quota exhaustion: the first worker to see a `429` sets a shared circuit-breaker `Event`, later workers skip the network entirely, and whatever is still uncleared is handed to the heuristic solver — pre-seeded with the entries T3 has already claimed this run so it can't double-assign them.
-* **Design Decision (Parallel classify, sequential resolve):** the per-credit LLM calls are independent network round-trips, so they fan out across a thread pool against a *frozen* snapshot of the used-index set (used only to shape the prompt — a stale snapshot can at worst make a suggestion less apt). Deterministic resolution then runs strictly sequentially in bank-sorted order against the *live* used-index set, which is what prevents two credits resolving onto the same payment.
+* **Design Decision (Backoff, then heuristic fallback):** With `GROQ_API_KEY` unset, T3 falls back to a deterministic refund-aware wide-window matcher, so the pipeline runs end to end without any LLM. When the key *is* present but a call hits a `429`, the worker sleeps for the API-suggested delay and retries — drawing from a bounded per-run backoff budget (`T3_BACKOFF_BUDGET_S`, default 90s), since free-tier token windows refill every ~60s and waiting one out recovers most of a run. Only once that budget is spent does a shared circuit-breaker `Event` trip: remaining workers skip the network and whatever is still uncleared goes to the heuristic solver — pre-seeded with the entries T3 has already claimed this run so it can't double-assign them.
+* **Design Decision (Serial by default, sequential resolve):** on a shared per-minute token quota, fanning N requests out just triggers N simultaneous 429s, so T3 classifies **serially** by default (`T3_LLM_MAX_WORKERS=1`); raise it when the account has real throughput headroom. When it does run in parallel, workers read a *frozen* snapshot of the used-index set (used only to shape the prompt). Deterministic resolution then runs strictly sequentially in bank-sorted order against the *live* used-index set, which is what prevents two credits resolving onto the same payment.
 * **Design Decision (Confidence Gate):** The LLM must supply a confidence score, letting the business reject low-confidence claims.
 
 ### T4: The Arithmetic Verifier + Uniqueness Gate (Deterministic Gate)
@@ -102,20 +103,28 @@ Ground truth is joined to the engine output **by `payment_id`** (`set_index("pay
 
 ### Measured results — 5,538 payments / 83 credits, seed 42, medium difficulty
 
-`GROQ_API_KEY` unset (T3 = deterministic heuristic), isolating the algorithmic behaviour:
+**LLM classifier active** (`GROQ_API_KEY` set, `qwen/qwen3.8-27b`):
 
 | metric | T0 | T0..T1 | T0..T2 | T0..T3 | T0..T4 | T0..T4 @0.95 |
 |---|---|---|---|---|---|---|
-| auto_clear_rate | 0.000 | 0.000 | 0.701 | 0.772 | **0.772** | 0.044 |
-| precision | – | – | 0.625 | 0.578 | **0.578** | **0.808** |
-| recall / accuracy | 0.000 | 0.000 | 0.438 | 0.447 | **0.447** | 0.036 |
-| credits_cleared | 0/83 | 0/83 | 55/83 | 64/83 | **64/83** | 3/83 |
+| auto_clear_rate | 0.000 | 0.000 | 0.701 | 0.722 | **0.717** | 0.044 |
+| precision | – | – | 0.625 | 0.630 | **0.635** | **0.808** |
+| recall / accuracy | 0.000 | 0.000 | 0.438 | 0.455 | **0.455** | 0.036 |
+| credits_cleared | 0/83 | 0/83 | 55/83 | 57/83 | **57/83** | 3/83 |
 
-T3 adds 9 credits (55 → 64) and raises auto-clear to 0.772, dropping precision to 0.578 — the heuristic's extra matches aren't all right. T4 now *keeps* those 64 via its non-exhaustive `AMBIGUOUS_PARTIAL @ 0.65` branch instead of rejecting them all. Tightening the confidence gate to 0.95 trades almost all the auto-clear rate back for **0.808 precision**. **Precision is bought with auto-clear rate, deliberately** — `@0.95` is the setting a controller who needs a trustworthy figure would run.
+T3's LLM classifier raises **both** precision (0.625 → 0.635) and recall (0.438 → 0.455) over the deterministic tiers. It clears fewer credits than the blunt heuristic would (57 vs 64 below) but is more *selective* — the correct trade for a financial ledger. Per-break it wins where structure matters: `netting_split` 0.360 → 0.386, `refund` 0.564 → 0.588, `chargeback_reversal` 0.592 → 0.599. T4's uniqueness gate then nudges precision 0.630 → 0.635 by rejecting the few unevidenced claims. `@0.95` trades almost all the auto-clear rate for **0.808 precision** — the setting a controller who needs a trustworthy figure would run. T3 is stochastic; expect ±1–2 credits / ±0.01 precision between runs.
 
-Previously the `T0..T4` column read identically to `T0..T2` (55/83, precision 0.625): the uniqueness gate rejected every T3 claim because the enumeration DP hit its state ceiling on 100–140-entry pools before proving anything. Narrowing the pool window to ±7 days and adding the non-exhaustive branch is what puts T3 into production through the verifier.
+**Deterministic-only** (`GROQ_API_KEY` unset — T3 = refund-aware heuristic):
 
-`Reconciled 5538 payments across 83 credits in ~1.4s — Throughput ~3,900 payments/sec.`
+| metric | T0..T2 | T0..T3 | T0..T4 | @0.95 |
+|---|---|---|---|---|
+| auto_clear_rate | 0.701 | 0.772 | 0.772 | 0.044 |
+| precision | 0.625 | 0.578 | 0.578 | 0.808 |
+| credits_cleared | 55/83 | 64/83 | 64/83 | 3/83 |
+
+The heuristic clears 64 at 0.578 precision; T4 keeps those 64 via its non-exhaustive `AMBIGUOUS_PARTIAL @ 0.65` branch. Previously the `T0..T4` column read identically to `T0..T2` (55/83, 0.625): the uniqueness gate rejected every T3 claim because the enumeration DP hit its state ceiling on 100–140-entry pools before proving anything. Narrowing the pool window to ±7 days and adding the non-exhaustive branch is what puts T3 into production through the verifier.
+
+`With the LLM active a full run takes ~90s (LLM round-trips dominate). The deterministic tiers alone reconcile 5,538 payments across 83 credits in ~1.4s — ~3,900 payments/sec.`
 
 ### Performance: the bitset subset-sum
 

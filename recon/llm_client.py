@@ -11,7 +11,7 @@ hardcoded, never logged, never written to a file.
 
 import os
 
-LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-oss-20b")
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
 
 
 class _GroqTextClient:
@@ -22,11 +22,16 @@ class _GroqTextClient:
         self._client = client
         self._model = model
 
-    def generate_content(self, prompt):
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[{"role": "user", "content": prompt}],
-        )
+    def generate_content(self, prompt, json_mode=False, max_tokens=None):
+        kwargs = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        response = self._client.chat.completions.create(**kwargs)
         return _Response(response.choices[0].message.content)
 
 
