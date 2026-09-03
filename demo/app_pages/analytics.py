@@ -154,8 +154,9 @@ st.space("large")
 
 st.subheader(":material/show_chart: Precision / auto-clear trade-off")
 st.caption(
-    "Adjusting the LLM confidence gate lets the business trade off between "
-    "automation rate and absolute precision."
+    "The confidence gate is a dial, not a fixed setting. Tighten it and "
+    "precision climbs toward 1.0 while fewer credits auto-clear — **the "
+    "business chooses the point.**"
 )
 
 curve_results = run_curve_cached(data_dir, max_tier)
@@ -173,7 +174,6 @@ for threshold, result in curve_results.items():
 curve_df = pd.DataFrame(curve_rows)
 
 if not curve_df.empty:
-    # Melt for dual-line chart
     melted = curve_df.melt(
         id_vars=["Confidence threshold", "Credits cleared"],
         value_vars=["Auto-clear rate", "Precision"],
@@ -181,36 +181,82 @@ if not curve_df.empty:
         value_name="Value",
     )
 
-    line_chart = (
-        alt.Chart(melted)
-        .mark_line(point=True, strokeWidth=3)
-        .encode(
-            x=alt.X(
-                "Confidence threshold:Q",
-                title="Minimum confidence threshold",
-                scale=alt.Scale(domain=[0, 1]),
+    # A vertical rule marking the confidence gate currently set in the
+    # sidebar — the "operating point" the rest of the app is running at.
+    op_point = pd.DataFrame({"Confidence threshold": [min_conf]})
+
+    base = alt.Chart(melted).encode(
+        x=alt.X(
+            "Confidence threshold:Q",
+            title="Minimum confidence gate",
+            scale=alt.Scale(domain=[0, 1]),
+            axis=alt.Axis(
+                values=sorted(curve_df["Confidence threshold"].tolist()),
+                format=".2f",
+                grid=False,
+                labelAngle=0,
             ),
-            y=alt.Y(
-                "Value:Q",
-                title="Rate",
-                scale=alt.Scale(domain=[0, 1]),
+        ),
+        y=alt.Y(
+            "Value:Q",
+            title="Rate",
+            scale=alt.Scale(domain=[0, 1]),
+            axis=alt.Axis(format=".0%", grid=True),
+        ),
+        color=alt.Color(
+            "Metric:N",
+            scale=alt.Scale(
+                domain=["Auto-clear rate", "Precision"],
+                range=["#8A8A8A", "#FFFFFF"],
             ),
-            color=alt.Color(
-                "Metric:N",
-                scale=alt.Scale(
-                    domain=["Auto-clear rate", "Precision"],
-                    range=["#FFFFFF", "#8A8A8A"],
-                ),
-            ),
-            tooltip=[
-                alt.Tooltip("Confidence threshold:Q", format=".2f"),
-                alt.Tooltip("Metric:N"),
-                alt.Tooltip("Value:Q", format=".3f"),
-            ],
-        )
+            legend=alt.Legend(title=None, orient="top"),
+        ),
     )
 
-    st.altair_chart(line_chart)
+    lines = base.mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=45, filled=True))
+    lines = lines.encode(
+        tooltip=[
+            alt.Tooltip("Confidence threshold:Q", title="Gate", format=".2f"),
+            alt.Tooltip("Metric:N", title=None),
+            alt.Tooltip("Value:Q", title="Rate", format=".1%"),
+            alt.Tooltip("Credits cleared:Q", title="Credits cleared"),
+        ],
+    )
+
+    op_rule = (
+        alt.Chart(op_point)
+        .mark_rule(color="#F5A623", strokeDash=[4, 3], strokeWidth=1.5)
+        .encode(x="Confidence threshold:Q")
+    )
+    op_text = (
+        alt.Chart(op_point)
+        .mark_text(
+            text=f"current gate {min_conf:.2f}",
+            align="left", dx=6, dy=-118, color="#F5A623", fontSize=11, fontWeight="bold",
+        )
+        .encode(x="Confidence threshold:Q")
+    )
+
+    st.altair_chart(op_rule + op_text + lines, use_container_width=True)
+
+    # Plain-language readout of the two ends of the curve.
+    lo = curve_df.iloc[0]
+    hi = curve_df.loc[curve_df["Precision"].idxmax()]
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(
+            f"**Gate off ({lo['Confidence threshold']:.2f})** — "
+            f"{lo['Auto-clear rate']:.0%} auto-cleared, "
+            f"{lo['Precision']:.0%} precision, {int(lo['Credits cleared'])} credits. "
+            "Maximum automation."
+        )
+    with c2:
+        st.markdown(
+            f"**Gate at {hi['Confidence threshold']:.2f}** — "
+            f"{hi['Auto-clear rate']:.0%} auto-cleared, "
+            f"**{hi['Precision']:.0%} precision**, {int(hi['Credits cleared'])} credits. "
+            "Only what's provable."
+        )
 else:
     st.info("No curve data available.", icon=":material/info:")
 
