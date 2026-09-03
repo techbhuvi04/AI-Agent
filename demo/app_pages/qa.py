@@ -4,8 +4,10 @@ import os
 
 import streamlit as st
 
-from shared import run_pipeline, run_cash_position, fmt_inr
+from shared import run_pipeline, run_cash_position, fmt_inr, inject_theme_css
 from recon.qa_agent import answer_question, build_context, is_available
+
+inject_theme_css()
 
 SUGGESTED_QUESTIONS = [
     "Why was yesterday's payout short?",
@@ -44,75 +46,109 @@ st.caption(
     "output — never from raw ledger rows."
 )
 
-if not is_available():
-    st.info(
-        "Set GROQ_API_KEY to enable natural language queries.",
-        icon=":material/key_off:",
-    )
-
-st.space("small")
-
 # ---------------------------------------------------------------------------
-# Suggested questions
+# Conversation state
 # ---------------------------------------------------------------------------
 
-if "qa_question" not in st.session_state:
-    st.session_state.qa_question = ""
+if "qa_history" not in st.session_state:
+    st.session_state.qa_history = []  # list of {"role": "user"|"assistant", "content": str}
+if "qa_pending" not in st.session_state:
+    st.session_state.qa_pending = None  # a question queued from a suggestion chip
 
-st.markdown("**Suggested questions**")
-cols = st.columns(2)
-for i, q in enumerate(SUGGESTED_QUESTIONS):
-    with cols[i % 2]:
-        def _set_question(question=q):
-            st.session_state.qa_question = question
 
-        st.button(
-            q,
-            key=f"suggest_{i}",
-            on_click=_set_question,
-            width="stretch",
-        )
+def _submit(q):
+    q = (q or "").strip()
+    if q:
+        st.session_state.qa_pending = q
 
-st.space("small")
 
 # ---------------------------------------------------------------------------
-# Question input
+# Empty state — suggested questions as chips
 # ---------------------------------------------------------------------------
 
-question = st.text_input(
-    "Your question",
-    value=st.session_state.qa_question,
-    placeholder="e.g. How much cash is at risk right now?",
-    key="qa_input",
-)
-
-ask = st.button("Ask", type="primary", icon=":material/send:")
-
-# ---------------------------------------------------------------------------
-# Answer
-# ---------------------------------------------------------------------------
-
-if question and (ask or st.session_state.qa_question == question):
+if not st.session_state.qa_history and not st.session_state.qa_pending:
     if not is_available():
-        st.warning(
-            "Set GROQ_API_KEY to enable natural language queries.",
+        st.info(
+            "Set `GROQ_API_KEY` to enable natural-language queries. "
+            "Everything else in the dashboard works without it.",
             icon=":material/key_off:",
         )
-    else:
-        with st.spinner("Thinking..."):
-            answer = answer_question(
-                question, result_df, bank_df, report_df, position
+
+    st.markdown(
+        '<div class="fc-chat-empty">'
+        '<div class="fc-chat-empty-icon">&#8853;</div>'
+        "<p>Ask about payouts, exceptions, cash at risk, or break types. "
+        "Answers are grounded in the verified reconciliation output.</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="fc-chip-label">Try one of these</div>', unsafe_allow_html=True)
+    cols = st.columns(2)
+    for i, q in enumerate(SUGGESTED_QUESTIONS):
+        with cols[i % 2]:
+            st.button(
+                q,
+                key=f"suggest_{i}",
+                on_click=_submit,
+                args=(q,),
+                width="stretch",
+                disabled=not is_available(),
             )
-        st.markdown("**Answer**")
-        with st.container(border=True):
-            st.markdown(answer)
 
-    st.space("small")
+# ---------------------------------------------------------------------------
+# Transcript
+# ---------------------------------------------------------------------------
 
-    with st.expander("Sources used"):
+for msg in st.session_state.qa_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# ---------------------------------------------------------------------------
+# Resolve a pending question (from a chip or the input box)
+# ---------------------------------------------------------------------------
+
+if st.session_state.qa_pending:
+    q = st.session_state.qa_pending
+    st.session_state.qa_pending = None
+    st.session_state.qa_history.append({"role": "user", "content": q})
+
+    with st.chat_message("user"):
+        st.markdown(q)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Reading the reconciliation output…"):
+            answer = answer_question(q, result_df, bank_df, report_df, position)
+        st.markdown(answer)
+
+    st.session_state.qa_history.append({"role": "assistant", "content": answer})
+
+    with st.expander("Sources used — the exact context the model saw"):
         st.caption(
-            "The exact structured context passed to the model — summarised "
-            "aggregates and the top exceptions, not raw ledger rows."
+            "Summarised aggregates and the top exceptions by value — not raw "
+            "ledger rows. The model answers from figures the engine already verified."
         )
-        context = build_context(result_df, bank_df, report_df, position)
-        st.code(context, language="markdown")
+        st.code(
+            build_context(result_df, bank_df, report_df, position),
+            language="markdown",
+        )
+
+# ---------------------------------------------------------------------------
+# Input — pinned to the bottom
+# ---------------------------------------------------------------------------
+
+prompt = st.chat_input(
+    "Ask about payouts, exceptions, or cash at risk…"
+    if is_available()
+    else "Set GROQ_API_KEY to enable",
+    disabled=not is_available(),
+)
+if prompt:
+    _submit(prompt)
+    st.rerun()
+
+if st.session_state.qa_history:
+    if st.button("Clear conversation", icon=":material/restart_alt:", type="tertiary"):
+        st.session_state.qa_history = []
+        st.session_state.qa_pending = None
+        st.rerun()

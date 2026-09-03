@@ -319,6 +319,96 @@ def inject_theme_css():
       [data-testid="stExpander"] summary {
         font-weight: 500;
       }
+
+      /* ---------------------------------------------------------------
+         Ask the controller — chat UI
+         --------------------------------------------------------------- */
+
+      /* Message rows: breathing room + a hairline divider between turns. */
+      [data-testid="stChatMessage"] {
+        background: transparent;
+        padding: 16px 0 8px;
+        gap: 12px;
+        align-items: flex-start;
+      }
+      [data-testid="stChatMessage"] + [data-testid="stChatMessage"] {
+        border-top: 1px solid rgba(255,255,255,0.06);
+      }
+
+      /* Avatars: monochrome. User = outline, assistant = filled (it speaks). */
+      [data-testid="stChatMessageAvatarUser"] {
+        background: #141414 !important;
+        border: 1px solid #3A3A3A !important;
+        color: #F5F5F5 !important;
+      }
+      [data-testid="stChatMessageAvatarAssistant"] {
+        background: #F5F5F5 !important;
+        border: 1px solid #F5F5F5 !important;
+        color: #000000 !important;
+      }
+
+      /* Assistant reply reads as a card; the user's question stays plain
+         so the eye lands on the answer. :has() picks the row by its avatar. */
+      [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
+        > [data-testid="stChatMessageContent"] {
+        background: linear-gradient(160deg, rgba(255,255,255,0.05), rgba(20,20,20,0.35));
+        border: 1px solid #2A2A2A;
+        border-radius: 3px 12px 12px 12px;
+        padding: 12px 16px;
+      }
+      [data-testid="stChatMessageContent"] { line-height: 1.55; }
+      [data-testid="stChatMessageContent"] p:last-child { margin-bottom: 0; }
+
+      /* Input bar: lift it off the page, match the 8px radius system. */
+      [data-testid="stChatInput"] {
+        border: 1px solid #3A3A3A;
+        border-radius: 12px;
+        background: #0C0C0C;
+        box-shadow: 0 -2px 24px rgba(0,0,0,0.6);
+      }
+      [data-testid="stChatInput"]:focus-within { border-color: #6E6E6E; }
+      [data-testid="stChatInput"] textarea::placeholder { color: #6E6E6E; }
+
+      /* Empty state */
+      .fc-chat-empty {
+        text-align: center;
+        max-width: 44ch;
+        margin: 30px auto 4px;
+        color: #A3A3A3;
+      }
+      .fc-chat-empty-icon {
+        width: 44px; height: 44px;
+        margin: 0 auto 14px;
+        border-radius: 12px;
+        border: 1px solid #3A3A3A;
+        background: #141414;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 22px; color: #F5F5F5;
+      }
+      .fc-chat-empty p { margin: 0; font-size: 0.92rem; line-height: 1.5; }
+
+      .fc-chip-label {
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: #737373;
+        margin: 22px 0 8px;
+      }
+      /* Suggestion chips: quiet until hovered, left-aligned like real prompts. */
+      .fc-chip-label + [data-testid="stHorizontalBlock"] [data-testid="stButton"] button {
+        background: #101010;
+        border: 1px solid #2A2A2A;
+        color: #D4D4D4;
+        font-weight: 400;
+        text-align: left;
+        justify-content: flex-start;
+        transition: border-color 120ms ease, background 120ms ease;
+      }
+      .fc-chip-label + [data-testid="stHorizontalBlock"] [data-testid="stButton"] button:hover:not(:disabled) {
+        border-color: #6E6E6E;
+        background: #171717;
+        color: #FFFFFF;
+      }
     </style>
     """)
 
