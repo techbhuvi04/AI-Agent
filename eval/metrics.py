@@ -7,9 +7,14 @@ ALL_BREAK_TYPES = ["clean"] + BREAK_TYPES
 
 
 def compute_metrics(result_df, ground_truth_df, cleared_credits, bank_df):
-    assigned_mask = result_df["assigned_utr"].notna()
+    assert len(result_df) == len(ground_truth_df), "result/ground_truth length mismatch"
+    gt = ground_truth_df.set_index("payment_id").reindex(result_df["payment_id"].values)
+    truth_utr = gt["credit_utr"].values
+    truth_break = gt["break_type"].values
+
+    assigned_mask = result_df["assigned_utr"].notna().values
     correct_mask = assigned_mask & (
-        result_df["assigned_utr"].fillna("") == ground_truth_df["credit_utr"]
+        result_df["assigned_utr"].fillna("").values == truth_utr
     )
 
     total = len(result_df)
@@ -20,16 +25,13 @@ def compute_metrics(result_df, ground_truth_df, cleared_credits, bank_df):
     precision = correct / assigned if assigned > 0 else None
     recall = correct / total if total > 0 else 0.0
 
-    if precision is not None and (precision + recall) > 0:
-        f1 = 2 * precision * recall / (precision + recall)
-    else:
-        f1 = None
+    accuracy = correct / total if total > 0 else 0.0
 
     overall = {
         "auto_clear_rate": auto_clear_rate,
         "precision": precision,
         "recall": recall,
-        "f1": f1,
+        "accuracy": accuracy,
         "credits_cleared": len(cleared_credits),
         "total_credits": len(bank_df),
         "payments_assigned": assigned,
@@ -38,7 +40,7 @@ def compute_metrics(result_df, ground_truth_df, cleared_credits, bank_df):
 
     per_break = {}
     for bt in ALL_BREAK_TYPES:
-        mask = ground_truth_df["break_type"] == bt
+        mask = truth_break == bt
         bt_total = int(mask.sum())
         if bt_total == 0:
             continue

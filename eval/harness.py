@@ -123,7 +123,7 @@ def print_ablation(results):
     print(header)
     print(f"  {'-'*20}" + f" {'-'*14}" * len(labels))
 
-    for metric_name in ["auto_clear_rate", "precision", "recall", "f1"]:
+    for metric_name in ["auto_clear_rate", "precision", "recall", "accuracy"]:
         row = f"  {metric_name:<20}"
         for label in labels:
             row += f" {_fmt(results[label]['overall'][metric_name], 14)}"
@@ -191,7 +191,7 @@ def print_single(metrics, label=""):
     print(f"  Auto-clear rate:  {_fmt(overall['auto_clear_rate'])}")
     print(f"  Precision:        {_fmt(overall['precision'])}")
     print(f"  Recall:           {_fmt(overall['recall'])}")
-    print(f"  F1:               {_fmt(overall['f1'])}")
+    print(f"  Accuracy:         {_fmt(overall['accuracy'])}")
 
     print(f"\n  {'break_type':<25} {'total':>6} {'correct':>8} {'prec':>8} {'recall':>8}")
     print(f"  {'-'*25} {'-'*6} {'-'*8} {'-'*8} {'-'*8}")

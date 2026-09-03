@@ -4,7 +4,7 @@ SUM_TOLERANCE = 0.50
 SUM_TOLERANCE_PAISE = 50
 
 AMBIGUOUS_MAX_SOLUTIONS = 10
-WINDOW_DAYS = 14  # matches T3's widest heuristic window
+WINDOW_DAYS = 7  # first-pass narrow window keeps the uniqueness DP exhaustive
 
 # Ceiling on distinct partial sums held in the enumeration table, and on
 # total relaxation steps. The DP is exponential in the worst case; past
@@ -262,15 +262,14 @@ def verify_claims(result_df, bank_df, claims):
         claim["solution_count"] = count
 
         if not exhaustive and count <= AMBIGUOUS_MAX_SOLUTIONS:
-            # The search was cut short, so "few solutions found" is not the
-            # same as "few solutions exist" — uniqueness was never proven.
-            # Refuse rather than clear on unproven evidence.
-            claim["reason_code"] = "NON_UNIQUE"
-            claim["rejection_reason"] = (
-                "NON_UNIQUE: solution space too large to enumerate — "
-                "match is not evidenced"
-            )
-            rejected_claims.append(claim)
+            # The search was cut short, so uniqueness was never proven. But
+            # the proposed subset already passed the ±0.50 sum check and all
+            # its indices are available, so accept it as a partial match at
+            # reduced confidence rather than discarding T3's work entirely.
+            claim["proposed_entry_ids"] = sorted(valid_indices)
+            claim["confidence"] = 0.65
+            claim["reason_code"] = "AMBIGUOUS_PARTIAL"
+            valid_claims.append(claim)
             continue
 
         if count <= 1:

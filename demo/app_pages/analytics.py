@@ -48,7 +48,7 @@ overall = metrics["overall"]
 with st.container(horizontal=True):
     st.metric("Precision", fmt_pct(overall["precision"]), border=True)
     st.metric("Recall", fmt_pct(overall["recall"]), border=True)
-    st.metric("F1 score", fmt_pct(overall["f1"]), border=True)
+    st.metric("Accuracy", fmt_pct(overall["accuracy"]), border=True)
     st.metric(
         "Auto-clear rate",
         fmt_pct(overall["auto_clear_rate"]),
@@ -136,7 +136,7 @@ if heat_rows:
             "Auto-clear rate": fmt_pct(o["auto_clear_rate"]),
             "Precision": fmt_pct(o["precision"]),
             "Recall": fmt_pct(o["recall"]),
-            "F1": fmt_pct(o["f1"]),
+            "Accuracy": fmt_pct(o["accuracy"]),
         })
 
     st.dataframe(

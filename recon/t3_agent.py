@@ -1,5 +1,7 @@
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 
 import pandas as pd
@@ -102,8 +104,15 @@ def _parse_response(text):
             try:
                 return json.loads(cleaned[start:end])
             except json.JSONDecodeError:
+                print(f"  T3: unparseable response (first 300 chars): {text[:300]!r}")
                 return None
+    print(f"  T3: unparseable response (first 300 chars): {text[:300]!r}")
     return None
+
+
+def _is_rate_limit_error(exc):
+    msg = str(exc)
+    return "rate_limit_exceeded" in msg or "429" in msg
 
 
 def _call_llm(client, prompt):
@@ -113,6 +122,19 @@ def _call_llm(client, prompt):
     except Exception as e:
         print(f"  T3: LLM call failed: {e}")
         return None
+
+
+def _call_llm_checked(client, prompt):
+    """Like _call_llm, but also surfaces whether the failure was a
+    rate limit — callers fanning this out across a pool use that signal
+    to stop sending doomed requests instead of burning through the rest
+    of an already-exhausted daily quota one 429 at a time."""
+    try:
+        response = client.generate_content(prompt)
+        return response.text, False
+    except Exception as e:
+        print(f"  T3: LLM call failed: {e}")
+        return None, _is_rate_limit_error(e)
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +338,43 @@ def resolve_hypothesis(df, used_indices, bank_lookup, diagnostics, break_classif
     return None
 
 
+LLM_MAX_WORKERS = int(os.environ.get("T3_LLM_MAX_WORKERS", "8"))
+
+
+def _classify_one(client, result_df, used_indices_snapshot, credit_row, bank_sorted, pos, rate_limited_event):
+    """One credit's diagnostics + LLM call — the network-bound unit of work
+    that gets fanned out across a thread pool. Reads `used_indices_snapshot`
+    (frozen before the pool starts) only to shape the candidate pool the
+    LLM sees; it never mutates shared state, so this is safe to run
+    concurrently. The classification is advisory only — resolve_hypothesis
+    re-verifies deterministically against the live used_indices afterward,
+    so a slightly stale snapshot can at worst make the LLM's suggestion
+    less apt, never cause a double-assignment.
+
+    `rate_limited_event` is a circuit breaker shared across the pool: once
+    any worker sees a 429, later-starting workers skip the network call
+    entirely instead of each independently discovering the same exhausted
+    daily quota — the account has one shared quota, so retrying it N more
+    times just burns N more doomed round-trips.
+    """
+    utr = credit_row["utr"]
+    diagnostics = compute_diagnostics(result_df, used_indices_snapshot, credit_row, bank_sorted, pos)
+
+    if rate_limited_event.is_set():
+        return pos, utr, diagnostics, None
+
+    prompt = _build_classification_prompt(diagnostics)
+    print(f"  T3: classifying break for {utr}...")
+    if rate_limited_event.is_set():
+        return pos, utr, diagnostics, None
+    raw, was_rate_limited = _call_llm_checked(client, prompt)
+    if was_rate_limited:
+        rate_limited_event.set()
+        print("  T3: rate limit hit — skipping remaining LLM calls for this run")
+    classification = _parse_response(raw)
+    return pos, utr, diagnostics, classification
+
+
 def _classification_solve(result_df, bank_df, already_cleared, client):
     used_indices = set()
     for indices in already_cleared.values():
@@ -326,18 +385,39 @@ def _classification_solve(result_df, bank_df, already_cleared, client):
     bank_sorted = bank_df.sort_values("value_date").reset_index(drop=True)
     bank_lookup = bank_df.set_index("utr")["credit"].to_dict()
 
+    pending = [
+        (pos, credit_row)
+        for pos, credit_row in bank_sorted.iterrows()
+        if credit_row["utr"] not in already_cleared
+    ]
+
+    # The LLM calls are the slow part (network round-trip per credit) and
+    # are independent of each other, so fan them out across a thread pool
+    # instead of paying N sequential round-trips. Diagnostics for this
+    # phase are computed against a frozen snapshot of used_indices — see
+    # _classify_one for why that's safe.
+    used_indices_snapshot = frozenset(used_indices)
+    results_by_pos = {}
+    rate_limited_event = threading.Event()
+    if pending:
+        with ThreadPoolExecutor(max_workers=min(LLM_MAX_WORKERS, len(pending))) as pool:
+            futures = [
+                pool.submit(
+                    _classify_one, client, result_df, used_indices_snapshot,
+                    credit_row, bank_sorted, pos, rate_limited_event,
+                )
+                for pos, credit_row in pending
+            ]
+            for future in as_completed(futures):
+                pos, utr, diagnostics, classification = future.result()
+                results_by_pos[pos] = (utr, diagnostics, classification)
+
     claims = []
-    for pos, credit_row in bank_sorted.iterrows():
-        utr = credit_row["utr"]
-        if utr in already_cleared:
-            continue
-
-        diagnostics = compute_diagnostics(result_df, used_indices, credit_row, bank_sorted, pos)
-        prompt = _build_classification_prompt(diagnostics)
-
-        print(f"  T3: classifying break for {utr}...")
-        raw = _call_llm(client, prompt)
-        classification = _parse_response(raw)
+    # Deterministic resolution stays strictly sequential, in original
+    # bank-sorted order, against the *live* used_indices — this is what
+    # keeps two credits from being resolved onto the same payment.
+    for pos, credit_row in pending:
+        utr, diagnostics, classification = results_by_pos[pos]
 
         if classification is None or "hypothesis" not in classification:
             print(f"  T3: {utr} — failed to parse classification response")
@@ -374,6 +454,19 @@ def _classification_solve(result_df, bank_df, already_cleared, client):
             f"  T3: {utr} — {break_classification} / {hypothesis.get('action')} "
             f"→ {len(members)} members"
         )
+
+    if rate_limited_event.is_set():
+        # The LLM quota ran out mid-run — rather than leaving every credit
+        # the breaker skipped as a hard miss, fall back to the
+        # deterministic heuristic solver for whatever's still uncleared.
+        # It won't classify break types, but it recovers the matches T2's
+        # exact-sum DP alone would miss.
+        still_uncleared = dict(already_cleared)
+        for claim in claims:
+            still_uncleared[claim["credit_utr"]] = claim["proposed_entry_ids"]
+        print("  T3: rate-limited — falling back to heuristic solver for the rest of this run")
+        extra_used = {i for c in claims for i in c["proposed_entry_ids"]}
+        claims.extend(_heuristic_solve(result_df, bank_df, still_uncleared, extra_used=extra_used))
 
     return claims
 
@@ -457,7 +550,7 @@ def _try_heuristic_match(df, credit_paise, value_date, used_indices):
     return None
 
 
-def _heuristic_solve(result_df, bank_df, already_cleared):
+def _heuristic_solve(result_df, bank_df, already_cleared, extra_used=None):
     """Deterministic heuristic fallback when no LLM is available.
 
     Uses wider date windows and refund-aware subset matching to clear
@@ -475,6 +568,9 @@ def _heuristic_solve(result_df, bank_df, already_cleared):
             # low-confidence entries can be reassigned by the heuristic.
             if df.at[idx, "assigned_confidence"] >= REASSIGN_THRESHOLD:
                 used_indices.add(idx)
+
+    if extra_used:
+        used_indices.update(extra_used)
 
     for _, credit_row in bank_sorted.iterrows():
         utr = credit_row["utr"]

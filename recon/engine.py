@@ -107,14 +107,17 @@ def reconcile(orders, settlements, bank, max_tier=1, min_confidence=0.0, run_id=
 
 
 def score(result, ground_truth):
-    truth_utr = ground_truth["credit_utr"]
-    assigned_utr = result["assigned_utr"]
+    assert len(result) == len(ground_truth), "result/ground_truth length mismatch"
+    gt = ground_truth.set_index("payment_id").reindex(result["payment_id"].values)
+    truth_utr = gt["credit_utr"].reset_index(drop=True)
+    truth_break = gt["break_type"].reset_index(drop=True)
+    assigned_utr = result["assigned_utr"].reset_index(drop=True)
 
     all_break_types = ["clean"] + BREAK_TYPES
     rows = []
 
     for bt in all_break_types:
-        mask = ground_truth["break_type"] == bt
+        mask = truth_break == bt
         total = int(mask.sum())
         if total == 0:
             continue

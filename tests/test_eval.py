@@ -56,7 +56,7 @@ class TestMetricsPerfectAssignment:
         assert metrics["overall"]["precision"] == 1.0
         assert metrics["overall"]["recall"] == 1.0
         assert metrics["overall"]["auto_clear_rate"] == 1.0
-        assert metrics["overall"]["f1"] == 1.0
+        assert metrics["overall"]["accuracy"] == 1.0
 
     def test_all_breaks_have_perfect_recall(self, eval_data):
         truth, orders, settlements, bank = eval_data
@@ -75,7 +75,7 @@ class TestMetricsStructure:
         metrics = compute_metrics(result, truth, cleared, bank)
         required = [
             "auto_clear_rate", "precision", "recall",
-            "f1", "credits_cleared", "total_credits",
+            "accuracy", "credits_cleared", "total_credits",
         ]
         for field in required:
             assert field in metrics["overall"], f"missing {field}"
