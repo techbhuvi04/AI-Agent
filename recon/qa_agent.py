@@ -7,6 +7,9 @@ and means the model is answering from figures the deterministic engine
 already verified rather than from rows it might misread.
 """
 
+import re
+import time
+
 import pandas as pd
 
 from recon import llm_client
@@ -133,16 +136,25 @@ def answer_question(question, result_df, bank_df, exception_report_df, cash_posi
 
 # Answer"""
 
-    try:
-        response = client.generate_content(prompt)
-        return (response.text or "").strip() or "The model returned an empty response."
-    except Exception as e:
-        msg = str(e)
-        if "rate_limit_exceeded" in msg or "429" in msg:
-            return (
-                "The LLM provider's daily usage limit has been reached for this "
-                "model. Try again later, or set LLM_MODEL to a different model "
-                "in your .env file."
-            )
-        print(f"  QA agent: LLM call failed: {e}")
-        return "The assistant hit an error answering that — please try again."
+    # One retry on a transient per-minute rate limit — the free-tier token
+    # window refills every ~60s and the 429 body tells us how long to wait.
+    for attempt in (1, 2):
+        try:
+            response = client.generate_content(prompt, max_tokens=600)
+            return (response.text or "").strip() or "The model returned an empty response."
+        except Exception as e:
+            msg = str(e)
+            is_rate_limit = "rate_limit_exceeded" in msg or "429" in msg
+            if is_rate_limit and attempt == 1:
+                m = re.search(r"try again in ([\d.]+)\s*s", msg)
+                wait = min(float(m.group(1)) + 0.5, 20.0) if m else 5.0
+                time.sleep(wait)
+                continue
+            if is_rate_limit:
+                return (
+                    "The LLM provider's usage limit was hit for this model. "
+                    "Try again in a minute, or set LLM_MODEL to a different "
+                    "model in your .env file."
+                )
+            print(f"  QA agent: LLM call failed: {e}")
+            return "The assistant hit an error answering that — please try again."
