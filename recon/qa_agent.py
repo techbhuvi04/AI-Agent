@@ -114,6 +114,32 @@ def build_context(result_df, bank_df, exception_report_df, cash_position_dict):
     return "\n".join(lines)
 
 
+def _generate_with_retry(client, prompt, max_tokens, label):
+    """Call the LLM, retrying once on a transient per-minute rate limit —
+    the free-tier token window refills every ~60s and the 429 body says
+    how long to wait. Returns the answer text, or a user-facing message."""
+    for attempt in (1, 2):
+        try:
+            response = client.generate_content(prompt, max_tokens=max_tokens)
+            return (response.text or "").strip() or "The model returned an empty response."
+        except Exception as e:
+            msg = str(e)
+            is_rate_limit = "rate_limit_exceeded" in msg or "429" in msg
+            if is_rate_limit and attempt == 1:
+                m = re.search(r"try again in ([\d.]+)\s*s", msg)
+                wait = min(float(m.group(1)) + 0.5, 20.0) if m else 5.0
+                time.sleep(wait)
+                continue
+            if is_rate_limit:
+                return (
+                    "The LLM provider's usage limit was hit for this model. "
+                    "Try again in a minute, or set LLM_MODEL to a different "
+                    "model in your .env file."
+                )
+            print(f"  {label}: LLM call failed: {e}")
+            return "The assistant hit an error — please try again."
+
+
 def answer_question(question, result_df, bank_df, exception_report_df, cash_position_dict):
     """Answer a natural-language question about the reconciliation state.
 
@@ -136,25 +162,49 @@ def answer_question(question, result_df, bank_df, exception_report_df, cash_posi
 
 # Answer"""
 
-    # One retry on a transient per-minute rate limit — the free-tier token
-    # window refills every ~60s and the 429 body tells us how long to wait.
-    for attempt in (1, 2):
-        try:
-            response = client.generate_content(prompt, max_tokens=600)
-            return (response.text or "").strip() or "The model returned an empty response."
-        except Exception as e:
-            msg = str(e)
-            is_rate_limit = "rate_limit_exceeded" in msg or "429" in msg
-            if is_rate_limit and attempt == 1:
-                m = re.search(r"try again in ([\d.]+)\s*s", msg)
-                wait = min(float(m.group(1)) + 0.5, 20.0) if m else 5.0
-                time.sleep(wait)
-                continue
-            if is_rate_limit:
-                return (
-                    "The LLM provider's usage limit was hit for this model. "
-                    "Try again in a minute, or set LLM_MODEL to a different "
-                    "model in your .env file."
-                )
-            print(f"  QA agent: LLM call failed: {e}")
-            return "The assistant hit an error answering that — please try again."
+    return _generate_with_retry(client, prompt, max_tokens=600, label="QA agent")
+
+
+EXPLAIN_SYSTEM_PROMPT = """You are a finance controller assistant explaining a \
+reconciliation exception to a non-technical colleague. You are given the \
+structured facts the deterministic engine already established — do not \
+invent numbers, do not propose specific payment IDs. Say "payments" (not \
+"invoices") and write all amounts in rupees with the ₹ symbol exactly as \
+given. In exactly two sentences: (1) say in plain English why this bank \
+credit could not be auto-matched, and (2) say what the controller should \
+check or do next. No jargon, no bullet points."""
+
+
+def explain_exception(exc_row, evidence_dict):
+    """Two-sentence plain-English explanation of one exception-queue row.
+
+    `exc_row` is a row from build_exception_report(); `evidence_dict` is
+    its parsed `evidence` JSON. The LLM only ever sees these already-
+    verified structured facts, never raw ledger rows.
+    """
+    client = _get_client()
+    if client is None:
+        return "Set GROQ_API_KEY to enable AI explanations."
+
+    facts = [
+        f"- bank credit: {_fmt_inr(float(exc_row['credit_amount']))} "
+        f"(UTR {exc_row['credit_utr']}, value date {exc_row['value_date']})",
+        f"- break code: {exc_row['break_code']}",
+        f"- age: {int(exc_row['age_days'])} days unresolved",
+        f"- materiality: {exc_row['materiality']}",
+        f"- gap to closest candidate subset: {_fmt_inr(float(exc_row['delta_inr']))}",
+        f"- candidates in the settlement window: {evidence_dict.get('num_candidates', 'unknown')}",
+        f"- closest subset sums to: {_fmt_inr(float(evidence_dict.get('closest_sum', 0)))}",
+    ]
+    if exc_row.get("hypothesis"):
+        facts.append(f"- engine's classification note: {exc_row['hypothesis']}")
+    if evidence_dict.get("solution_count"):
+        facts.append(
+            f"- distinct payment subsets that hit this amount: "
+            f"{evidence_dict['solution_count']} (so no single match is provable)"
+        )
+
+    prompt = (
+        f"{EXPLAIN_SYSTEM_PROMPT}\n\n# Facts\n" + "\n".join(facts) + "\n\n# Explanation"
+    )
+    return _generate_with_retry(client, prompt, max_tokens=220, label="Explain")

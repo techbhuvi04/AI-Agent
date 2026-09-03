@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from shared import run_pipeline, run_exception_report, fmt_inr, inject_theme_css
+from recon.qa_agent import explain_exception, is_available as llm_available
 
 inject_theme_css()
 
@@ -202,6 +203,24 @@ for row_pos, (_, exc) in enumerate(filtered.iterrows()):
                 icon=":material/check_circle:",
                 on_click=mark_investigated,
             )
+
+            if llm_available():
+                explain_key = f"explain_{row_pos}_{utr}"
+                if st.button(
+                    "Why did this break?",
+                    key=f"explainbtn_{row_pos}_{utr}",
+                    icon=":material/psychology:",
+                    help="Plain-English explanation from the LLM, grounded in the "
+                         "structured evidence below — never the raw ledger.",
+                ):
+                    try:
+                        _ev = json.loads(exc["evidence"])
+                    except (TypeError, ValueError):
+                        _ev = {}
+                    with st.spinner("Reading the evidence..."):
+                        st.session_state[explain_key] = explain_exception(exc, _ev)
+                if st.session_state.get(explain_key):
+                    st.info(st.session_state[explain_key], icon=":material/auto_awesome:")
 
         with col_right:
             st.markdown("**Evidence — closest candidate subset found**")
