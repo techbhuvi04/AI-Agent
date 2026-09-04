@@ -73,6 +73,32 @@ Reconciliation means proving mathematically that each bank credit equals a speci
 | **Cash position** | 7-day forward inflow forecast with confidence band and cash-at-risk aging |
 | **Ask** | Natural-language Q&A over the reconciliation output (requires `GROQ_API_KEY`) |
 
+## Screenshots
+
+**Overview** — headline metrics, controller metrics with the precision/auto-clear-rate trade-off explained, and the T0–T4 architecture pipeline.
+
+![Overview page](docs/screenshots/overview.png)
+
+**Reconciliation** — tier-by-tier execution log, cumulative clearance waterfall, and the full assignment table with per-payment confidence.
+
+![Reconciliation page](docs/screenshots/reconciliation.png)
+
+**Analytics** — the tier ablation heatmap (per-break recall at every tier combination) and the precision / auto-clear trade-off curve.
+
+![Analytics page](docs/screenshots/analytics.png)
+
+**Exception queue** — every unresolved credit with materiality, age, evidence, and the **"Why did this break?"** LLM explanation button.
+
+![Exception queue page](docs/screenshots/exception_queue.png)
+
+**Cash position** — verified-settled vs at-risk, a 7-day forward inflow forecast, and cash-at-risk aging buckets.
+
+![Cash position page](docs/screenshots/cash_position.png)
+
+**Ask** — the chat interface over the reconciliation output, grounded in structured evidence rather than raw ledger rows.
+
+![Ask page](docs/screenshots/ask.png)
+
 ## Architecture
 
 The engine uses a tiered "deterministic first, probabilistic second" control loop:
