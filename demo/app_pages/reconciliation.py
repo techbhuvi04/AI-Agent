@@ -48,7 +48,7 @@ st.space("small")
 
 st.subheader(":material/play_circle: Tier execution")
 
-tier_data = run_tier_by_tier(data_dir, min_conf)
+tier_data = run_tier_by_tier(data_dir, min_conf, max_tier)
 
 # Display each tier as an expandable status block
 prev_cleared = 0

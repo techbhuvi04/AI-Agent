@@ -52,19 +52,43 @@ def run_pipeline(data_dir, max_tier, min_confidence):
 
 
 @st.cache_resource(ttl="30m")
-def run_tier_by_tier(data_dir, min_confidence):
-    """Run each tier individually to capture incremental clearance counts."""
-    orders, settlements, bank = load_data(data_dir)
+def run_tier_by_tier(data_dir, min_confidence, max_tier=4):
+    """Derive incremental per-tier clearance from ONE reconcile() run.
+
+    Every payment's `assigned_tier` column already says which tier cleared
+    it, so tier N's snapshot is just "everything with assigned_tier <= N" —
+    no need to re-run the pipeline once per tier. Routes through
+    run_pipeline (same cache key shape) instead of calling reconcile()
+    directly, so this page reuses that cache entry rather than paying for
+    a second full pass — which matters a lot when T3 is LLM-backed: this
+    used to mean T3's ~90s LLM pass ran twice on this page alone (once
+    here, once in run_pipeline), on top of doing genuinely redundant work
+    for T0/T1/T2 five times over.
+    """
     truth = load_ground_truth(data_dir)
+    final_df, bank, _final_cleared, _metrics, _truth = run_pipeline(
+        data_dir, max_tier, min_confidence
+    )
 
     tier_results = []
     for tier in range(5):  # T0 through T4
-        result_df, cleared = reconcile(
-            orders, settlements, bank,
-            max_tier=tier,
-            min_confidence=min_confidence,
-        )
-        metrics = compute_metrics(result_df, truth, cleared, bank)
+        if tier == 0:
+            # Nothing assigned yet at T0 — mirrors reconcile(max_tier=0).
+            snapshot = final_df.copy()
+            snapshot["assigned_utr"] = pd.NA
+        else:
+            cleared_by_now = pd.to_numeric(
+                final_df["assigned_tier"], errors="coerce"
+            ) <= tier
+            snapshot = final_df.copy()
+            snapshot.loc[~cleared_by_now, "assigned_utr"] = pd.NA
+
+        cleared = {}
+        for idx, utr in snapshot["assigned_utr"].items():
+            if pd.notna(utr):
+                cleared.setdefault(utr, []).append(idx)
+
+        metrics = compute_metrics(snapshot, truth, cleared, bank)
         tier_results.append({
             "tier": f"T{tier}",
             "credits_cleared": metrics["overall"]["credits_cleared"],
